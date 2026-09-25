@@ -1,0 +1,75 @@
+name: Publish
+
+# Publishes all workspace crates to crates.io with a single
+# `cargo publish --workspace`, which publishes in dependency order and
+# verifies every package before uploading any of them.
+#
+# Trigger: push a tag named "v<version>" (for example "v0.10.4") after the
+# version bump PR has merged, or run the workflow manually from the Actions
+# tab. The tag must match the version in the Cargo.toml files.
+#
+# If a run fails after some crates were uploaded, `cargo publish` refuses to
+# republish them. Recover by running the workflow manually with the `exclude`
+# input set to the crates that are already published.
+#
+# Requires a CARGO_REGISTRY_TOKEN secret that contains a crates.io API token
+# with publish rights on all three crates. Alternatively, configure trusted
+# publishing on crates.io for this repository and workflow, and remove the
+# token.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      exclude:
+        description: Crates to skip, space-separated (recovery after a partial publish)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  CARGO_REGISTRY_TOKEN: ${{secrets.CARGO_REGISTRY_TOKEN}}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: crates.io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version = ' dbt-yaml/Cargo.toml | cut -d'"' -f2)
+          for crate in dbt-yaml_derive dbt-yaml_schemars_derive; do
+            other=$(grep -m1 '^version = ' "$crate/Cargo.toml" | cut -d'"' -f2)
+            if [[ $other != "$version" ]]; then
+              echo "::error::Version mismatch: dbt-yaml is $version but $crate is $other"
+              exit 1
+            fi
+          done
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match crate version $version"
+            exit 1
+          fi
+          echo "Publishing version $version"
+
+      - name: Publish crates
+        shell: bash
+        run: |
+          read -ra exclude <<< "${{inputs.exclude}}"
+          args=(--workspace)
+          for crate in "${exclude[@]}"; do
+            args+=(--exclude "$crate")
+          done
+          cargo publish "${args[@]}"
