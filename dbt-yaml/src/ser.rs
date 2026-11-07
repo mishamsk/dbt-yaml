@@ -7,13 +7,16 @@ use crate::libyaml;
 use crate::libyaml::emitter::{Emitter, Event, Mapping, Scalar, ScalarStyle, Sequence};
 use crate::value::tagged::{self, MaybeTag};
 use serde::de::Visitor;
-use serde::ser::{self, Serializer as _};
+use serde::ser;
 use std::fmt::{self, Display};
 use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::num;
 use std::str;
+
+#[cfg(feature = "flatten_dunder")]
+mod flatten;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -46,6 +49,12 @@ pub struct Serializer<W> {
     state: State,
     emitter: Emitter<'static>,
     writer: PhantomData<W>,
+    /// Per open struct, the plan of entries to skip; see [`flatten`].
+    #[cfg(feature = "flatten_dunder")]
+    plans: Vec<Option<flatten::Plan>>,
+    /// The plan probed for the value about to be serialized.
+    #[cfg(feature = "flatten_dunder")]
+    next_plan: Option<flatten::Plan>,
 }
 
 enum State {
@@ -72,6 +81,10 @@ where
             state: State::NothingInParticular,
             emitter,
             writer: PhantomData,
+            #[cfg(feature = "flatten_dunder")]
+            plans: Vec::new(),
+            #[cfg(feature = "flatten_dunder")]
+            next_plan: None,
         }
     }
 
@@ -163,6 +176,37 @@ where
             self.state = State::NothingInParticular;
         }
         Ok(())
+    }
+
+    /// Serializes a value nested in the current one. With `flatten_dunder`
+    /// the value is probed first, so that a struct knows which of its
+    /// flattened entries are overwritten by later ones.
+    fn serialize_child<V>(&mut self, value: &V) -> Result<()>
+    where
+        V: ?Sized + ser::Serialize,
+    {
+        #[cfg(feature = "flatten_dunder")]
+        {
+            self.next_plan = flatten::plan_for(value);
+        }
+        value.serialize(self)
+    }
+
+    fn serialize_struct_field<V>(&mut self, key: &'static str, value: &V) -> Result<()>
+    where
+        V: ?Sized + ser::Serialize,
+    {
+        #[cfg(feature = "flatten_dunder")]
+        {
+            if crate::is_flatten_key(key.as_bytes()) {
+                return value.serialize(flatten::FlattenSerializer { ser: self });
+            }
+            if self.skip_entry() {
+                return Ok(());
+            }
+        }
+        ser::Serializer::serialize_str(&mut *self, key)?;
+        self.serialize_child(value)
     }
 }
 
@@ -400,7 +444,7 @@ where
     where
         T: ?Sized + ser::Serialize,
     {
-        value.serialize(self)
+        self.serialize_child(value)
     }
 
     fn serialize_newtype_variant<T>(
@@ -417,7 +461,7 @@ where
             return Err(error::new(ErrorImpl::SerializeNestedEnum));
         }
         self.state = State::FoundTag(variant.to_owned());
-        value.serialize(&mut *self)
+        self.serialize_child(value)
     }
 
     fn serialize_none(self) -> Result<()> {
@@ -428,7 +472,7 @@ where
     where
         V: ?Sized + ser::Serialize,
     {
-        value.serialize(self)
+        self.serialize_child(value)
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
@@ -479,7 +523,11 @@ where
         Ok(self)
     }
 
-    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self::SerializeStruct> {
+    fn serialize_struct(self, name: &'static str, len: usize) -> Result<Self::SerializeStruct> {
+        #[cfg(feature = "flatten_dunder")]
+        self.push_plan(name, len);
+        #[cfg(not(feature = "flatten_dunder"))]
+        let _ = (name, len);
         self.emit_mapping_start()?;
         Ok(self)
     }
@@ -489,11 +537,15 @@ where
         _enm: &'static str,
         _idx: u32,
         variant: &'static str,
-        _len: usize,
+        len: usize,
     ) -> Result<Self::SerializeStructVariant> {
         if let State::FoundTag(_) = self.state {
             return Err(error::new(ErrorImpl::SerializeNestedEnum));
         }
+        #[cfg(feature = "flatten_dunder")]
+        self.push_plan(variant, len);
+        #[cfg(not(feature = "flatten_dunder"))]
+        let _ = len;
         self.state = State::FoundTag(variant.to_owned());
         self.emit_mapping_start()?;
         Ok(self)
@@ -534,7 +586,7 @@ where
     where
         T: ?Sized + ser::Serialize,
     {
-        elem.serialize(&mut **self)
+        self.serialize_child(elem)
     }
 
     fn end(self) -> Result<()> {
@@ -553,7 +605,7 @@ where
     where
         T: ?Sized + ser::Serialize,
     {
-        elem.serialize(&mut **self)
+        self.serialize_child(elem)
     }
 
     fn end(self) -> Result<()> {
@@ -572,7 +624,7 @@ where
     where
         V: ?Sized + ser::Serialize,
     {
-        value.serialize(&mut **self)
+        self.serialize_child(value)
     }
 
     fn end(self) -> Result<()> {
@@ -591,7 +643,7 @@ where
     where
         V: ?Sized + ser::Serialize,
     {
-        v.serialize(&mut **self)
+        self.serialize_child(v)
     }
 
     fn end(self) -> Result<()> {
@@ -611,14 +663,14 @@ where
         T: ?Sized + ser::Serialize,
     {
         self.flush_mapping_start()?;
-        key.serialize(&mut **self)
+        self.serialize_child(key)
     }
 
     fn serialize_value<T>(&mut self, value: &T) -> Result<()>
     where
         T: ?Sized + ser::Serialize,
     {
-        value.serialize(&mut **self)
+        self.serialize_child(value)
     }
 
     fn serialize_entry<K, V>(&mut self, key: &K, value: &V) -> Result<(), Self::Error>
@@ -626,9 +678,9 @@ where
         K: ?Sized + ser::Serialize,
         V: ?Sized + ser::Serialize,
     {
-        key.serialize(&mut **self)?;
+        self.serialize_child(key)?;
         let tagged = matches!(self.state, State::FoundTag(_));
-        value.serialize(&mut **self)?;
+        self.serialize_child(value)?;
         if tagged {
             self.state = State::AlreadyTagged;
         }
@@ -658,11 +710,12 @@ where
     where
         V: ?Sized + ser::Serialize,
     {
-        self.serialize_str(key)?;
-        value.serialize(&mut **self)
+        self.serialize_struct_field(key, value)
     }
 
     fn end(self) -> Result<()> {
+        #[cfg(feature = "flatten_dunder")]
+        self.pop_plan();
         self.emit_mapping_end()
     }
 }
@@ -678,11 +731,12 @@ where
     where
         V: ?Sized + ser::Serialize,
     {
-        self.serialize_str(field)?;
-        v.serialize(&mut **self)
+        self.serialize_struct_field(field, v)
     }
 
     fn end(self) -> Result<()> {
+        #[cfg(feature = "flatten_dunder")]
+        self.pop_plan();
         self.emit_mapping_end()
     }
 }
@@ -697,7 +751,7 @@ where
     T: ?Sized + ser::Serialize,
 {
     let mut serializer = Serializer::new(writer);
-    value.serialize(&mut serializer)
+    serializer.serialize_child(value)
 }
 
 /// Serialize the given data structure as a String of YAML.
