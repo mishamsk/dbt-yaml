@@ -33,6 +33,7 @@ schemars = ["dep:schemars", "dep:dbt-yaml_schemars_derive"]
 anyhow = "1.0.79"
 indoc = "2.0"
 serde_derive = "1.0.195"
+serde_json = "1.0"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
