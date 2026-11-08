@@ -51,10 +51,10 @@ pub struct Serializer<W> {
     writer: PhantomData<W>,
     /// Per open struct, the plan of entries to skip; see [`flatten`].
     #[cfg(feature = "flatten_dunder")]
-    plans: Vec<Option<flatten::Plan>>,
+    plans: Vec<Option<(crate::probe::Plan, usize)>>,
     /// The plan probed for the value about to be serialized.
     #[cfg(feature = "flatten_dunder")]
-    next_plan: Option<flatten::Plan>,
+    next_plan: Option<crate::probe::Plan>,
 }
 
 enum State {
@@ -187,7 +187,7 @@ where
     {
         #[cfg(feature = "flatten_dunder")]
         {
-            self.next_plan = flatten::plan_for(value);
+            self.next_plan = crate::probe::plan_for(value);
         }
         value.serialize(self)
     }

@@ -162,6 +162,7 @@
     clippy::must_use_candidate,
 )]
 
+pub use crate::as_value::{AsValue, WithEntry};
 pub use crate::de::{from_reader, from_slice, from_str, Deserializer};
 pub use crate::error::{Error, Result};
 pub use crate::ser::{to_string, to_writer, Serializer};
@@ -187,6 +188,7 @@ pub use crate::mapping::Mapping;
 #[doc(inline)]
 pub use crate::path::Path;
 
+mod as_value;
 mod de;
 mod error;
 mod libyaml;
@@ -194,6 +196,7 @@ mod loader;
 pub mod mapping;
 mod number;
 pub mod path;
+mod probe;
 mod ser;
 mod shouldbe;
 pub mod spanned;
