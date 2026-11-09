@@ -331,10 +331,22 @@ where
         self.inner.serialize_str(variant)
     }
 
-    fn serialize_newtype_struct<T>(self, _: &'static str, value: &T) -> Result<S::Ok, S::Error>
+    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> Result<S::Ok, S::Error>
     where
         T: ?Sized + Serialize,
     {
+        // A timestamp becomes `Value::Timestamp`, which serializes in its
+        // canonical form.
+        #[cfg(feature = "yaml_11")]
+        if name == crate::timestamp::TOKEN {
+            let repr = value
+                .serialize(crate::timestamp::ExtractString)
+                .map_err(S::Error::custom)?;
+            let timestamp = crate::Timestamp::parse(&repr)
+                .ok_or_else(|| S::Error::custom("invalid timestamp"))?;
+            return timestamp.serialize(self.inner);
+        }
+        let _ = name;
         serialize_as_value(value, self.inner, self.extra)
     }
 
@@ -693,10 +705,15 @@ impl<'m, 'a, M: SerializeMap> Serializer for Flatten<'m, 'a, M> {
         Err(not_mapping())
     }
 
-    fn serialize_newtype_struct<T>(self, _: &'static str, value: &T) -> Result<(), M::Error>
+    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> Result<(), M::Error>
     where
         T: ?Sized + Serialize,
     {
+        #[cfg(feature = "yaml_11")]
+        if name == crate::timestamp::TOKEN {
+            return Err(not_mapping());
+        }
+        let _ = name;
         value.serialize(self)
     }
 

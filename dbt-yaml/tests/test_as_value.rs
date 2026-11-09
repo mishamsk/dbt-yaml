@@ -459,3 +459,19 @@ fn test_flatten_not_mapping() {
     let expected = dbt_yaml::to_value(&thing).unwrap_err();
     assert_eq!(expected.to_string(), error.to_string());
 }
+
+#[cfg(feature = "yaml_11")]
+#[test]
+fn test_timestamp() {
+    #[derive(Serialize)]
+    struct Event {
+        at: dbt_yaml::Timestamp,
+    }
+    let thing = Event {
+        at: dbt_yaml::Timestamp::parse("2001-12-14 21:59:43.10 -5").unwrap(),
+    };
+    let yaml = indoc! {"
+        at: 2001-12-14T21:59:43.100-05:00
+    "};
+    test_as_value(&thing, yaml);
+}

@@ -76,10 +76,15 @@ where
         Err(not_mapping())
     }
 
-    fn serialize_newtype_struct<T>(self, _: &'static str, value: &T) -> Result<()>
+    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
+        #[cfg(feature = "yaml_11")]
+        if name == crate::timestamp::TOKEN {
+            return Err(not_mapping());
+        }
+        let _ = name;
         value.serialize(self)
     }
 
