@@ -5,171 +5,208 @@ use indoc::indoc;
 use serde_derive::Serialize;
 use std::collections::BTreeMap;
 
-/// Without colliding keys, streaming matches the `to_value` path byte for
-/// byte.
-fn test_same_as_value<T: serde::Serialize>(thing: &T, expected: &str) {
-    let streamed = dbt_yaml::to_string(thing).unwrap();
-    assert_eq!(streamed, expected);
-    let via_value = dbt_yaml::to_string(&dbt_yaml::to_value(thing).unwrap()).unwrap();
-    assert_eq!(streamed, via_value);
+/// Without repeated keys, `to_string` writes exactly what serializing the
+/// `to_value` result writes.
+fn test_flatten<T>(thing: &T, yaml: &str)
+where
+    T: serde::Serialize,
+{
+    let serialized = dbt_yaml::to_string(thing).unwrap();
+    assert_eq!(yaml, serialized);
+
+    let value = dbt_yaml::to_value(thing).unwrap();
+    let serialized = dbt_yaml::to_string(&value).unwrap();
+    assert_eq!(yaml, serialized);
 }
 
-/// With colliding keys, the last value wins as in `to_value`, but the entry
-/// sits at its last occurrence, so only the data (not the order) matches.
-fn test_same_data_as_value<T: serde::Serialize>(thing: &T, expected: &str) {
-    let streamed = dbt_yaml::to_string(thing).unwrap();
-    assert_eq!(streamed, expected);
-    let reparsed: Value = dbt_yaml::from_str(&streamed).unwrap();
-    assert_eq!(reparsed, dbt_yaml::to_value(thing).unwrap());
-}
+/// With repeated keys, the last value wins as in `to_value`, but the entry
+/// is written at its last position, so only the data matches.
+fn test_flatten_overwrite<T>(thing: &T, yaml: &str)
+where
+    T: serde::Serialize,
+{
+    let serialized = dbt_yaml::to_string(thing).unwrap();
+    assert_eq!(yaml, serialized);
 
-fn map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
-    entries
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
+    let reparsed: Value = dbt_yaml::from_str(&serialized).unwrap();
+    assert_eq!(dbt_yaml::to_value(thing).unwrap(), reparsed);
 }
 
 #[test]
-fn test_flatten_struct_and_map() {
+fn test_flatten_struct() {
     #[derive(Serialize)]
     struct Outer {
         name: &'static str,
-        __attrs__: Attrs,
-        __other__: BTreeMap<String, String>,
+        __inner__: Inner,
     }
 
     #[derive(Serialize)]
-    struct Attrs {
-        size: u32,
-        __more__: Option<BTreeMap<String, String>>,
+    struct Inner {
+        width: u32,
+        height: u32,
     }
 
     let thing = Outer {
-        name: "x",
-        __attrs__: Attrs {
-            size: 1,
-            __more__: Some(map(&[("deep", "true story")])),
+        name: "box",
+        __inner__: Inner {
+            width: 1,
+            height: 2,
         },
-        __other__: map(&[("extra", "e")]),
     };
-    test_same_as_value(
-        &thing,
-        indoc! {"
-            name: x
-            size: 1
-            deep: true story
-            extra: e
-        "},
-    );
+    let yaml = indoc! {"
+        name: box
+        width: 1
+        height: 2
+    "};
+    test_flatten(&thing, yaml);
 }
 
 #[test]
-fn test_flatten_collision_last_wins() {
-    // The shape of fusion's semantic model node: `unrendered_config` exists
-    // in both the base attributes and the node's own attributes, and the
-    // latter is authoritative.
-    #[derive(Serialize)]
-    struct Node {
-        __base_attr__: Base,
-        __semantic_model_attr__: Attr,
-        deprecated_config: u32,
-    }
-
-    #[derive(Serialize)]
-    struct Base {
-        name: &'static str,
-        unrendered_config: BTreeMap<String, String>,
-    }
-
-    #[derive(Serialize)]
-    struct Attr {
-        model: &'static str,
-        unrendered_config: BTreeMap<String, String>,
-    }
-
-    let thing = Node {
-        __base_attr__: Base {
-            name: "m",
-            unrendered_config: map(&[("from", "base")]),
-        },
-        __semantic_model_attr__: Attr {
-            model: "ref('m')",
-            unrendered_config: map(&[("from", "attr")]),
-        },
-        deprecated_config: 1,
-    };
-    test_same_data_as_value(
-        &thing,
-        indoc! {"
-            name: m
-            model: ref('m')
-            unrendered_config:
-              from: attr
-            deprecated_config: 1
-        "},
-    );
-
-    // Each element of a sequence is probed on its own.
-    test_same_data_as_value(
-        &vec![thing],
-        indoc! {"
-            - name: m
-              model: ref('m')
-              unrendered_config:
-                from: attr
-              deprecated_config: 1
-        "},
-    );
-}
-
-#[test]
-fn test_flatten_collision_with_later_field() {
+fn test_flatten_map() {
     #[derive(Serialize)]
     struct Outer {
-        __rest__: BTreeMap<String, String>,
-        a: &'static str,
+        name: &'static str,
+        __extra__: BTreeMap<&'static str, &'static str>,
+    }
+
+    let thing = Outer {
+        name: "box",
+        __extra__: BTreeMap::from([("color", "red")]),
+    };
+    let yaml = indoc! {"
+        name: box
+        color: red
+    "};
+    test_flatten(&thing, yaml);
+}
+
+#[test]
+fn test_flatten_nested() {
+    #[derive(Serialize)]
+    struct Outer {
+        name: &'static str,
+        __inner__: Inner,
+    }
+
+    #[derive(Serialize)]
+    struct Inner {
+        width: u32,
+        __extra__: Option<BTreeMap<&'static str, &'static str>>,
+    }
+
+    let thing = Outer {
+        name: "box",
+        __inner__: Inner {
+            width: 1,
+            __extra__: Some(BTreeMap::from([("color", "red")])),
+        },
+    };
+    let yaml = indoc! {"
+        name: box
+        width: 1
+        color: red
+    "};
+    test_flatten(&thing, yaml);
+}
+
+#[test]
+fn test_flatten_overwrite_between_flattened() {
+    #[derive(Serialize)]
+    struct Record {
+        __header__: Header,
+        __body__: Body,
+        version: u32,
+    }
+
+    #[derive(Serialize)]
+    struct Header {
+        id: u32,
+        labels: Vec<&'static str>,
+    }
+
+    #[derive(Serialize)]
+    struct Body {
+        text: &'static str,
+        labels: Vec<&'static str>,
+    }
+
+    let thing = Record {
+        __header__: Header {
+            id: 1,
+            labels: vec!["header"],
+        },
+        __body__: Body {
+            text: "hello",
+            labels: vec!["body"],
+        },
+        version: 2,
+    };
+    let yaml = indoc! {"
+        id: 1
+        text: hello
+        labels:
+        - body
+        version: 2
+    "};
+    test_flatten_overwrite(&thing, yaml);
+
+    // Each element of a sequence is probed on its own.
+    let thing = vec![thing];
+    let yaml = indoc! {"
+        - id: 1
+          text: hello
+          labels:
+          - body
+          version: 2
+    "};
+    test_flatten_overwrite(&thing, yaml);
+}
+
+#[test]
+fn test_flatten_overwrite_by_field() {
+    #[derive(Serialize)]
+    struct Outer {
+        __extra__: BTreeMap<&'static str, &'static str>,
+        color: &'static str,
         inner: Inner,
     }
 
     #[derive(Serialize)]
     struct Inner {
-        b: &'static str,
-        __rest__: BTreeMap<String, String>,
+        size: &'static str,
+        __extra__: BTreeMap<&'static str, &'static str>,
     }
 
     let thing = Outer {
-        __rest__: map(&[("a", "flattened"), ("c", "kept")]),
-        a: "field",
+        __extra__: BTreeMap::from([("color", "red"), ("shape", "round")]),
+        color: "blue",
         inner: Inner {
-            b: "field",
-            __rest__: map(&[("b", "flattened")]),
+            size: "small",
+            __extra__: BTreeMap::from([("size", "large")]),
         },
     };
-    test_same_data_as_value(
-        &thing,
-        indoc! {"
-            c: kept
-            a: field
-            inner:
-              b: flattened
-        "},
-    );
+    let yaml = indoc! {"
+        shape: round
+        color: blue
+        inner:
+          size: large
+    "};
+    test_flatten_overwrite(&thing, yaml);
 }
 
 #[test]
 fn test_flatten_not_mapping() {
     #[derive(Serialize)]
     struct Outer {
-        a: u32,
-        __rest__: Option<BTreeMap<String, String>>,
+        name: &'static str,
+        __extra__: Option<BTreeMap<&'static str, &'static str>>,
     }
 
     let thing = Outer {
-        a: 1,
-        __rest__: None,
+        name: "box",
+        __extra__: None,
     };
-    let streamed = dbt_yaml::to_string(&thing).unwrap_err();
-    let via_value = dbt_yaml::to_value(&thing).unwrap_err();
-    assert_eq!(streamed.to_string(), via_value.to_string());
+    let error = dbt_yaml::to_string(&thing).unwrap_err();
+    let expected = dbt_yaml::to_value(&thing).unwrap_err();
+    assert_eq!(expected.to_string(), error.to_string());
 }

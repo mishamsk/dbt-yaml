@@ -1,273 +1,461 @@
 use dbt_yaml::{AsValue, Value};
-use serde::Serialize as SerializeTrait;
+use indoc::indoc;
 use serde_derive::Serialize;
 use std::collections::BTreeMap;
 
-/// `AsValue` writes byte for byte what serializing the `to_value` result
-/// writes, through serde_json and through the YAML serializer.
-fn test_same_as_value<T: SerializeTrait>(thing: &T) {
+// serde_json is a dev-dependency only for these tests: `AsValue` must behave
+// the same through any serde serializer, so each case also goes through a
+// serializer other than this crate's own.
+
+/// `AsValue` writes exactly what serializing the `to_value` result writes.
+fn test_as_value<T>(thing: &T, yaml: &str)
+where
+    T: serde::Serialize,
+{
     let value = dbt_yaml::to_value(thing).unwrap();
-    assert_eq!(
-        serde_json::to_string(&AsValue(thing)).unwrap(),
-        serde_json::to_string(&value).unwrap(),
-    );
-    assert_eq!(
-        dbt_yaml::to_string(&AsValue(thing)).unwrap(),
-        dbt_yaml::to_string(&value).unwrap(),
-    );
+    let serialized = dbt_yaml::to_string(&value).unwrap();
+    assert_eq!(yaml, serialized);
+
+    let serialized = dbt_yaml::to_string(&AsValue(thing)).unwrap();
+    assert_eq!(yaml, serialized);
+
+    let json = serde_json::to_string(&value).unwrap();
+    let serialized = serde_json::to_string(&AsValue(thing)).unwrap();
+    assert_eq!(json, serialized);
 }
 
-struct Bytes(&'static [u8]);
+/// `thing` writes the same data as `expected`, with entries in another
+/// order.
+fn test_as_value_reordered<T>(thing: &T, expected: &Value, yaml: &str)
+where
+    T: serde::Serialize,
+{
+    let serialized = dbt_yaml::to_string(thing).unwrap();
+    assert_eq!(yaml, serialized);
+    let reparsed: Value = dbt_yaml::from_str(&serialized).unwrap();
+    assert_eq!(*expected, reparsed);
 
-impl SerializeTrait for Bytes {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(self.0)
-    }
-}
-
-#[derive(Serialize)]
-enum Kind {
-    Unit,
-    Newtype(u32),
-    Tuple(u32, &'static str),
-    Struct { a: u32 },
-}
-
-#[derive(Serialize)]
-struct Unit;
-
-#[derive(Serialize)]
-struct Wrapper(f32);
-
-#[derive(Serialize)]
-struct Scalars {
-    flag: bool,
-    small: i8,
-    negative: i64,
-    positive: i32,
-    huge: u128,
-    tiny: i128,
-    single: f32,
-    double: f64,
-    nan: f64,
-    letter: char,
-    digits: &'static str,
-    none: Option<u32>,
-    some: Option<&'static str>,
-    unit: Unit,
-    wrapper: Wrapper,
-    bytes: Bytes,
-    list: Vec<u8>,
-    pair: (u32, &'static str),
-    numbered: BTreeMap<u32, &'static str>,
-    kinds: Vec<Kind>,
-    value: Value,
+    let json: serde_json::Value = serde_json::to_value(thing).unwrap();
+    assert_eq!(serde_json::to_value(expected).unwrap(), json);
 }
 
 #[test]
-fn test_data_model() {
-    test_same_as_value(&Scalars {
-        flag: true,
+fn test_int() {
+    #[derive(Serialize)]
+    struct Ints {
+        small: i8,
+        positive: i32,
+        max: u64,
+    }
+    let thing = Ints {
         small: -3,
-        negative: -5,
         positive: 7,
-        huge: u128::MAX,
-        tiny: i128::MIN,
-        single: 1.1,
-        double: 2.5,
-        nan: -f64::NAN,
-        letter: 'a',
-        digits: "007",
+        max: u64::MAX,
+    };
+    let yaml = indoc! {"
+        small: -3
+        positive: 7
+        max: 18446744073709551615
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_int_wider_than_64_bits() {
+    #[derive(Serialize)]
+    struct Wide {
+        max: u128,
+        min: i128,
+    }
+    let thing = Wide {
+        max: u128::MAX,
+        min: i128::MIN,
+    };
+    let yaml = indoc! {"
+        max: '340282366920938463463374607431768211455'
+        min: '-170141183460469231731687303715884105728'
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_float32() {
+    let thing = 1.1f32;
+    let yaml = indoc! {"
+        1.100000023841858
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_nan() {
+    let thing = -f64::NAN;
+    let yaml = indoc! {"
+        .nan
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_char() {
+    let thing = 'a';
+    let yaml = indoc! {"
+        a
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_bytes() {
+    struct Bytes(&'static [u8]);
+
+    impl serde::Serialize for Bytes {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    let thing = Bytes(b"hi");
+    let yaml = indoc! {"
+        - 104
+        - 105
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_option() {
+    #[derive(Serialize)]
+    struct Options {
+        none: Option<u32>,
+        some: Option<&'static str>,
+    }
+    let thing = Options {
         none: None,
         some: Some("x"),
-        unit: Unit,
-        wrapper: Wrapper(0.1),
-        bytes: Bytes(b"hi"),
-        list: vec![1, 2],
-        pair: (1, "one"),
-        numbered: [(1, "one"), (2, "two")].into(),
-        kinds: vec![
-            Kind::Unit,
-            Kind::Newtype(1),
-            Kind::Tuple(2, "two"),
-            Kind::Struct { a: 3 },
-        ],
-        value: dbt_yaml::from_str("map: {k: !Tag v}\nseq: [1, -2, 3.5, null]").unwrap(),
-    });
+    };
+    let yaml = indoc! {"
+        none: null
+        some: x
+    "};
+    test_as_value(&thing, yaml);
 }
 
 #[test]
-fn test_top_level_variants() {
-    test_same_as_value(&Kind::Unit);
-    test_same_as_value(&Kind::Newtype(1));
-    test_same_as_value(&Kind::Tuple(2, "two"));
-    test_same_as_value(&Kind::Struct { a: 3 });
-    test_same_as_value(&Some(Kind::Struct { a: 3 }));
+fn test_unit_struct() {
+    #[derive(Serialize)]
+    struct Foo;
+    let thing = Foo;
+    let yaml = indoc! {"
+        null
+    "};
+    test_as_value(&thing, yaml);
 }
 
-#[derive(Serialize)]
-struct Node {
-    name: &'static str,
-    resource_type: &'static str,
+#[test]
+fn test_newtype_struct() {
+    #[derive(Serialize)]
+    struct OriginalType {
+        v: u16,
+    }
+    #[derive(Serialize)]
+    struct NewType(OriginalType);
+    let thing = NewType(OriginalType { v: 1 });
+    let yaml = indoc! {"
+        v: 1
+    "};
+    test_as_value(&thing, yaml);
 }
 
-#[derive(Serialize)]
-struct Other {
-    name: &'static str,
+#[test]
+fn test_tuple() {
+    let thing = (1, "one");
+    let yaml = indoc! {"
+        - 1
+        - one
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_map_integer_keys() {
+    let thing = BTreeMap::from([(1, "one"), (2, "two")]);
+    let yaml = indoc! {"
+        1: one
+        2: two
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_unit_variant() {
+    #[derive(Serialize)]
+    enum Variant {
+        First,
+    }
+    let thing = Variant::First;
+    let yaml = indoc! {"
+        First
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_newtype_variant() {
+    #[derive(Serialize)]
+    enum Variant {
+        Size(usize),
+    }
+    let thing = Variant::Size(127);
+    let yaml = indoc! {"
+        !Size 127
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_tuple_variant() {
+    #[derive(Serialize)]
+    enum Variant {
+        Rgb(u8, u8, u8),
+    }
+    let thing = Variant::Rgb(32, 64, 96);
+    let yaml = indoc! {"
+        !Rgb
+        - 32
+        - 64
+        - 96
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_struct_variant() {
+    #[derive(Serialize)]
+    enum Variant {
+        Color { r: u8, g: u8, b: u8 },
+    }
+    let thing = Variant::Color {
+        r: 32,
+        g: 64,
+        b: 96,
+    };
+    let yaml = indoc! {"
+        !Color
+        r: 32
+        g: 64
+        b: 96
+    "};
+    test_as_value(&thing, yaml);
+
+    let thing = vec![thing];
+    let yaml = indoc! {"
+        - !Color
+          r: 32
+          g: 64
+          b: 96
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[test]
+fn test_tagged_value() {
+    let thing: Value = dbt_yaml::from_str("k: !Tag v").unwrap();
+    let yaml = indoc! {"
+        k: !Tag v
+    "};
+    test_as_value(&thing, yaml);
+}
+
+/// The `to_value` result of `thing` with an entry inserted into its mapping.
+fn insert_entry<T>(thing: &T, key: &str, entry: &str) -> Value
+where
+    T: serde::Serialize,
+{
+    let mut value = dbt_yaml::to_value(thing).unwrap();
+    if let Value::Mapping(mapping, ..) = &mut value {
+        mapping.insert(
+            Value::string(key.to_owned()),
+            Value::string(entry.to_owned()),
+        );
+    }
+    value
 }
 
 #[test]
 fn test_with_entry() {
-    fn via_value<T: SerializeTrait>(thing: &T) -> String {
-        let mut value = dbt_yaml::to_value(thing).unwrap();
-        if let Value::Mapping(mapping, ..) = &mut value {
-            mapping.insert(
-                Value::string("resource_type".into()),
-                Value::string("source".into()),
-            );
-        }
-        serde_json::to_string(&value).unwrap()
+    #[derive(Serialize)]
+    struct Basic {
+        x: u32,
     }
+    let thing = Basic { x: 1 };
+    let serialized = dbt_yaml::to_string(&AsValue(&thing).with_entry("y", "two")).unwrap();
+    let expected = dbt_yaml::to_string(&insert_entry(&thing, "y", "two")).unwrap();
+    assert_eq!(expected, serialized);
+    let yaml = indoc! {"
+        x: 1
+        y: two
+    "};
+    assert_eq!(yaml, serialized);
+}
 
-    // A new key lands at the end, as inserting into the mapping puts it.
-    let other = Other { name: "n" };
-    assert_eq!(
-        serde_json::to_string(&AsValue(&other).with_entry("resource_type", "source")).unwrap(),
-        via_value(&other),
-    );
-
-    // An existing key is replaced; it moves to the end, unlike an insert.
-    let node = Node {
-        name: "n",
-        resource_type: "model",
-    };
-    let streamed = serde_json::to_string(&AsValue(&node).with_entry("resource_type", "source"));
-    assert_eq!(
-        streamed.unwrap(),
-        r#"{"name":"n","resource_type":"source"}"#
-    );
-
-    // Values that are not mappings are left alone.
-    assert_eq!(
-        serde_json::to_string(&AsValue(&1).with_entry("resource_type", "source")).unwrap(),
-        via_value(&1),
+#[test]
+fn test_with_entry_existing_key() {
+    #[derive(Serialize)]
+    struct Basic {
+        x: u32,
+        y: &'static str,
+    }
+    let thing = Basic { x: 1, y: "one" };
+    // The entry replaces the struct's own, but moves to the end.
+    let yaml = indoc! {"
+        x: 1
+        y: two
+    "};
+    test_as_value_reordered(
+        &AsValue(&thing).with_entry("y", "two"),
+        &insert_entry(&thing, "y", "two"),
+        yaml,
     );
 }
 
+#[test]
+fn test_with_entry_not_mapping() {
+    let thing = 1;
+    let serialized = dbt_yaml::to_string(&AsValue(&thing).with_entry("y", "two")).unwrap();
+    let yaml = indoc! {"
+        1
+    "};
+    assert_eq!(yaml, serialized);
+}
+
 #[cfg(feature = "flatten_dunder")]
-mod flatten {
-    use super::*;
-
-    /// With colliding keys, the data matches `to_value` but the surviving
-    /// entry sits at its last position.
-    fn test_same_data_as_value<T: SerializeTrait>(thing: &T, expected: &str) {
-        let streamed = serde_json::to_string(&AsValue(thing)).unwrap();
-        assert_eq!(streamed, expected);
-        let reparsed: serde_json::Value = serde_json::from_str(&streamed).unwrap();
-        let via_value = serde_json::to_value(dbt_yaml::to_value(thing).unwrap()).unwrap();
-        assert_eq!(reparsed, via_value);
-    }
-
-    fn map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
-        entries
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
+#[test]
+fn test_flatten() {
     #[derive(Serialize)]
     struct Outer {
         name: &'static str,
-        __attrs__: Attrs,
-        __other__: BTreeMap<String, String>,
+        __inner__: Inner,
+        __extra__: BTreeMap<&'static str, &'static str>,
     }
-
     #[derive(Serialize)]
-    struct Attrs {
-        size: u32,
-        __more__: Option<BTreeMap<String, String>>,
+    struct Inner {
+        width: u32,
+        __more__: Option<BTreeMap<&'static str, &'static str>>,
     }
+    let thing = Outer {
+        name: "box",
+        __inner__: Inner {
+            width: 1,
+            __more__: Some(BTreeMap::from([("height", "2")])),
+        },
+        __extra__: BTreeMap::from([("color", "red")]),
+    };
+    let yaml = indoc! {"
+        name: box
+        width: 1
+        height: '2'
+        color: red
+    "};
+    test_as_value(&thing, yaml);
+}
 
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_struct_variant() {
     #[derive(Serialize)]
     enum Variant {
-        Flat { a: u32, __rest__: Attrs },
+        Shape { name: &'static str, __size__: Size },
     }
-
-    #[test]
-    fn test_flatten() {
-        let outer = Outer {
-            name: "x",
-            __attrs__: Attrs {
-                size: 1,
-                __more__: Some(map(&[("deep", "d")])),
-            },
-            __other__: map(&[("extra", "e")]),
-        };
-        test_same_as_value(&outer);
-        test_same_as_value(&vec![outer]);
-        test_same_as_value(&Variant::Flat {
-            a: 1,
-            __rest__: Attrs {
-                size: 2,
-                __more__: Some(map(&[("deep", "d")])),
-            },
-        });
+    #[derive(Serialize)]
+    struct Size {
+        width: u32,
+        height: u32,
     }
+    let thing = Variant::Shape {
+        name: "box",
+        __size__: Size {
+            width: 1,
+            height: 2,
+        },
+    };
+    let yaml = indoc! {"
+        !Shape
+        name: box
+        width: 1
+        height: 2
+    "};
+    test_as_value(&thing, yaml);
+}
 
-    #[test]
-    fn test_flatten_not_mapping() {
-        #[derive(Serialize)]
-        struct Bad {
-            __rest__: Option<BTreeMap<String, String>>,
-        }
-
-        let bad = Bad { __rest__: None };
-        let streamed = serde_json::to_string(&AsValue(&bad)).unwrap_err();
-        let via_value = dbt_yaml::to_value(&bad).unwrap_err();
-        assert_eq!(streamed.to_string(), via_value.to_string());
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_overwrite() {
+    #[derive(Serialize)]
+    struct Record {
+        __header__: Header,
+        __body__: Body,
+        version: u32,
     }
-
-    #[test]
-    fn test_flatten_collision() {
-        // The shape of fusion's semantic model node: `unrendered_config` is
-        // in both the base attributes and the node's own attributes.
-        #[derive(Serialize)]
-        struct Node {
-            __base_attr__: Base,
-            __semantic_model_attr__: Attr,
-            deprecated_config: u32,
-        }
-
-        #[derive(Serialize)]
-        struct Base {
-            name: &'static str,
-            unrendered_config: BTreeMap<String, String>,
-        }
-
-        #[derive(Serialize)]
-        struct Attr {
-            model: &'static str,
-            unrendered_config: BTreeMap<String, String>,
-        }
-
-        let node = Node {
-            __base_attr__: Base {
-                name: "m",
-                unrendered_config: map(&[("from", "base")]),
-            },
-            __semantic_model_attr__: Attr {
-                model: "m",
-                unrendered_config: map(&[("from", "attr")]),
-            },
-            deprecated_config: 1,
-        };
-        test_same_data_as_value(
-            &node,
-            r#"{"name":"m","model":"m","unrendered_config":{"from":"attr"},"deprecated_config":1}"#,
-        );
-        test_same_data_as_value(
-            &AsValue(&node).with_entry("name", "renamed"),
-            r#"{"model":"m","unrendered_config":{"from":"attr"},"deprecated_config":1,"name":"renamed"}"#,
-        );
+    #[derive(Serialize)]
+    struct Header {
+        id: u32,
+        labels: Vec<&'static str>,
     }
+    #[derive(Serialize)]
+    struct Body {
+        text: &'static str,
+        labels: Vec<&'static str>,
+    }
+    let thing = Record {
+        __header__: Header {
+            id: 1,
+            labels: vec!["header"],
+        },
+        __body__: Body {
+            text: "hello",
+            labels: vec!["body"],
+        },
+        version: 2,
+    };
+    // The body's labels win, at their own position.
+    let yaml = indoc! {"
+        id: 1
+        text: hello
+        labels:
+        - body
+        version: 2
+    "};
+    let expected = dbt_yaml::to_value(&thing).unwrap();
+    test_as_value_reordered(&AsValue(&thing), &expected, yaml);
+
+    let yaml = indoc! {"
+        text: hello
+        labels:
+        - body
+        version: 2
+        id: 3
+    "};
+    let mut expected = expected;
+    if let Value::Mapping(mapping, ..) = &mut expected {
+        mapping.insert(Value::string("id".to_owned()), Value::from(3));
+    }
+    test_as_value_reordered(&AsValue(&thing).with_entry("id", &3), &expected, yaml);
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_not_mapping() {
+    #[derive(Serialize)]
+    struct Outer {
+        name: &'static str,
+        __extra__: Option<BTreeMap<&'static str, &'static str>>,
+    }
+    let thing = Outer {
+        name: "box",
+        __extra__: None,
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    let expected = dbt_yaml::to_value(&thing).unwrap_err();
+    assert_eq!(expected.to_string(), error.to_string());
 }
