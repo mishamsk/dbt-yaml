@@ -1,6 +1,8 @@
 use dbt_yaml::{AsValue, Value};
 use indoc::indoc;
+use serde::ser::{Impossible, SerializeStruct as _};
 use serde_derive::Serialize;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 // serde_json is a dev-dependency only for these tests: `AsValue` must behave
@@ -474,4 +476,252 @@ fn test_timestamp() {
         at: 2001-12-14T21:59:43.100-05:00
     "};
     test_as_value(&thing, yaml);
+}
+
+/// Reports the length a value's top-level map is started with.
+struct MapLen;
+
+struct MapLenEntries(Option<usize>);
+
+type MapLenError = serde::de::value::Error;
+
+fn not_a_map<T>() -> Result<T, MapLenError> {
+    Err(serde::ser::Error::custom("not a map"))
+}
+
+impl serde::Serializer for MapLen {
+    type Ok = Option<usize>;
+    type Error = MapLenError;
+    type SerializeSeq = Impossible<Self::Ok, MapLenError>;
+    type SerializeTuple = Impossible<Self::Ok, MapLenError>;
+    type SerializeTupleStruct = Impossible<Self::Ok, MapLenError>;
+    type SerializeTupleVariant = Impossible<Self::Ok, MapLenError>;
+    type SerializeMap = MapLenEntries;
+    type SerializeStruct = Impossible<Self::Ok, MapLenError>;
+    type SerializeStructVariant = Impossible<Self::Ok, MapLenError>;
+
+    fn serialize_map(self, len: Option<usize>) -> Result<MapLenEntries, MapLenError> {
+        Ok(MapLenEntries(len))
+    }
+
+    fn serialize_bool(self, _: bool) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i64(self, _: i64) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i8(self, _: i8) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i16(self, _: i16) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i32(self, _: i32) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u8(self, _: u8) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u16(self, _: u16) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u32(self, _: u32) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u64(self, _: u64) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_f32(self, _: f32) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_f64(self, _: f64) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_char(self, _: char) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_str(self, _: &str) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_bytes(self, _: &[u8]) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_none(self) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_some<T: ?Sized + serde::Serialize>(self, _: &T) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_unit(self) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_unit_struct(self, _: &'static str) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_unit_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+    ) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_newtype_struct<T: ?Sized + serde::Serialize>(
+        self,
+        _: &'static str,
+        _: &T,
+    ) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_newtype_variant<T: ?Sized + serde::Serialize>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: &T,
+    ) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_tuple_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleStruct, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleVariant, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStruct, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStructVariant, MapLenError> {
+        not_a_map()
+    }
+}
+
+impl serde::ser::SerializeMap for MapLenEntries {
+    type Ok = Option<usize>;
+    type Error = MapLenError;
+
+    fn serialize_key<T: ?Sized + serde::Serialize>(&mut self, _: &T) -> Result<(), MapLenError> {
+        Ok(())
+    }
+    fn serialize_value<T: ?Sized + serde::Serialize>(&mut self, _: &T) -> Result<(), MapLenError> {
+        Ok(())
+    }
+    fn end(self) -> Result<Self::Ok, MapLenError> {
+        Ok(self.0)
+    }
+}
+
+fn map_len<T: serde::Serialize>(thing: &T) -> Option<usize> {
+    thing.serialize(MapLen).unwrap()
+}
+
+#[test]
+fn test_map_len() {
+    #[derive(Serialize)]
+    struct Basic {
+        x: u32,
+        y: u32,
+    }
+    let thing = Basic { x: 1, y: 2 };
+    assert_eq!(Some(2), map_len(&AsValue(&thing)));
+    assert_eq!(Some(3), map_len(&AsValue(&thing).with_entry("z", "three")));
+    assert_eq!(Some(2), map_len(&AsValue(&thing).with_entry("y", "two")));
+
+    let thing = BTreeMap::from([("x", 1), ("y", 2)]);
+    assert_eq!(Some(2), map_len(&AsValue(&thing)));
+    assert_eq!(Some(3), map_len(&AsValue(&thing).with_entry("z", &3)));
+    assert_eq!(Some(2), map_len(&AsValue(&thing).with_entry("y", &3)));
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_map_len() {
+    #[derive(Serialize)]
+    struct Outer {
+        name: &'static str,
+        __inner__: Inner,
+        __extra__: BTreeMap<&'static str, &'static str>,
+    }
+    #[derive(Serialize)]
+    struct Inner {
+        width: u32,
+        height: u32,
+    }
+    let thing = Outer {
+        name: "box",
+        __inner__: Inner {
+            width: 1,
+            height: 2,
+        },
+        __extra__: BTreeMap::from([("color", "red"), ("shape", "square")]),
+    };
+    let expected = map_len(&dbt_yaml::to_value(&thing).unwrap());
+    assert_eq!(Some(5), expected);
+    assert_eq!(expected, map_len(&AsValue(&thing)));
+
+    // A repeated key is counted once.
+    let thing = Outer {
+        name: "box",
+        __inner__: Inner {
+            width: 1,
+            height: 2,
+        },
+        __extra__: BTreeMap::from([("width", "wide")]),
+    };
+    let expected = map_len(&dbt_yaml::to_value(&thing).unwrap());
+    assert_eq!(Some(3), expected);
+    assert_eq!(expected, map_len(&AsValue(&thing)));
+}
+
+#[test]
+fn test_nondeterministic() {
+    // Names itself differently after the first call, which is the probe.
+    struct Fickle {
+        calls: Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let name = if calls == 0 { "First" } else { "Later" };
+            let mut state = serializer.serialize_struct(name, 1)?;
+            state.serialize_field("x", &1)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: Cell::new(0),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
 }

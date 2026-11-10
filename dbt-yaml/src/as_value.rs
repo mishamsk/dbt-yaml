@@ -1,6 +1,6 @@
 //! Serializing a value through any serializer as its `Value` would.
 
-use crate::probe::{self, scalars, Plan, Shape};
+use crate::probe::{self, scalars, Analysis, Plan, Shape, NONDETERMINISTIC};
 use crate::value::tagged::nobang;
 use serde::ser::{self, Error as _, Impossible, Serialize, SerializeMap, SerializeSeq, Serializer};
 use std::fmt::{self, Display};
@@ -8,7 +8,6 @@ use std::mem;
 
 const EMPTY_TAG: &str = "empty YAML tag is not allowed";
 const NOT_MAPPING: &str = "expected the flatten field to be a mapping";
-const NONDETERMINISTIC: &str = "Serialize impl made different calls when probed";
 
 /// Serializes the wrapped value through any serializer exactly as
 /// [`to_value`](crate::to_value) of it would serialize, without building the
@@ -36,10 +35,17 @@ const NONDETERMINISTIC: &str = "Serialize impl made different calls when probed"
 ///
 /// Each nested value is probed before it is written: its `Serialize` impl
 /// runs once more against a serializer that records only its shape (twice
-/// for structs with dunder fields). Impls must therefore make the same calls
-/// every time. Where dunder fields produce the same key more than once, the
-/// last value wins as in `to_value`, but the entry is written at its last
-/// position rather than its first.
+/// for structs with dunder fields, which also records their keys). The probe
+/// tells which entries to skip and how many entries each map has, so every
+/// map is started with its exact length.
+///
+/// Impls must therefore make the same calls every time. A struct or variant
+/// whose impl makes different calls when probed fails with an error rather
+/// than writing a wrong plan or length.
+///
+/// Where dunder fields produce the same key more than once, the last value
+/// wins as in `to_value`, but the entry is written at its last position
+/// rather than its first.
 pub struct AsValue<'a, T: ?Sized>(pub &'a T);
 
 impl<'a, T: ?Sized> AsValue<'a, T> {
@@ -116,7 +122,6 @@ where
     S: Serializer,
 {
     let analysis = probe::analyze(value, extra.map(|extra| extra.key));
-    let plan = analysis.plan.as_ref();
     match analysis.shape {
         // The variant's data is the value of a single-entry map, but serde
         // hands it over field by field. Writing the map's value runs the
@@ -130,16 +135,14 @@ where
                 &Tag(variant),
                 &VariantData {
                     value,
-                    plan,
-                    has_flatten: analysis.has_flatten,
+                    analysis: &analysis,
                 },
             )?;
             map.end()
         }
         _ => value.serialize(Adapter {
             inner: serializer,
-            plan,
-            has_flatten: analysis.has_flatten,
+            analysis: &analysis,
             extra,
             variant_data: false,
         }),
@@ -167,8 +170,7 @@ impl Display for Tag {
 /// The data of a tuple or struct variant, without its tag.
 struct VariantData<'a, T: ?Sized> {
     value: &'a T,
-    plan: Option<&'a Plan>,
-    has_flatten: bool,
+    analysis: &'a Analysis,
 }
 
 impl<T> Serialize for VariantData<'_, T>
@@ -181,8 +183,7 @@ where
     {
         self.value.serialize(Adapter {
             inner: serializer,
-            plan: self.plan,
-            has_flatten: self.has_flatten,
+            analysis: self.analysis,
             extra: None,
             variant_data: true,
         })
@@ -191,11 +192,8 @@ where
 
 struct Adapter<'a, S: Serializer> {
     inner: S,
-    /// Entries to skip, if the value is a struct with colliding keys.
-    plan: Option<&'a Plan>,
-    /// Whether the value is a struct with dunder fields, so its entry count
-    /// is unknown.
-    has_flatten: bool,
+    /// What probing the value found: its shape, entry count and plan.
+    analysis: &'a Analysis,
     extra: Option<Extra<'a, S::SerializeMap>>,
     /// Whether to write only the data of a tuple or struct variant.
     variant_data: bool,
@@ -388,52 +386,60 @@ where
         self,
         _: &'static str,
         _: u32,
-        _: &'static str,
+        variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleVariant, S::Error> {
-        if !self.variant_data {
+        if !self.variant_data
+            || !matches!(self.analysis.shape, Shape::TupleVariant { variant: probed } if probed == variant)
+        {
             return Err(S::Error::custom(NONDETERMINISTIC));
         }
         self.inner.serialize_seq(Some(len)).map(Seq)
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, S::Error> {
-        let len = if self.plan.is_some() || self.extra.is_some() {
-            None
+        // With an extra entry the probe counted the entries; otherwise the
+        // map's own length is exact.
+        let len = if self.extra.is_some() {
+            self.analysis.len
         } else {
             len
         };
         let map = self.inner.serialize_map(len)?;
-        Ok(Map::new(map, self.plan, self.extra))
+        Ok(Map::new(map, self.analysis.plan.as_ref(), self.extra))
     }
 
     fn serialize_struct(
         self,
-        _: &'static str,
+        name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStruct, S::Error> {
-        let len = if self.has_flatten || self.extra.is_some() {
-            None
-        } else {
-            Some(len)
-        };
-        let map = self.inner.serialize_map(len)?;
-        Ok(Map::new(map, self.plan, self.extra))
+        if !matches!(self.analysis.shape, Shape::Struct { name: n, len: l } if (n, l) == (name, len))
+        {
+            return Err(S::Error::custom(NONDETERMINISTIC));
+        }
+        // The probe counted the entries when dunder fields or an extra entry
+        // change them; otherwise the struct's own length is exact.
+        let len = self.analysis.len.unwrap_or(len);
+        let map = self.inner.serialize_map(Some(len))?;
+        Ok(Map::new(map, self.analysis.plan.as_ref(), self.extra))
     }
 
     fn serialize_struct_variant(
         self,
         _: &'static str,
         _: u32,
-        _: &'static str,
+        variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStructVariant, S::Error> {
-        if !self.variant_data {
+        if !self.variant_data
+            || !matches!(self.analysis.shape, Shape::StructVariant { variant: v, len: l } if (v, l) == (variant, len))
+        {
             return Err(S::Error::custom(NONDETERMINISTIC));
         }
-        let len = if self.has_flatten { None } else { Some(len) };
-        let map = self.inner.serialize_map(len)?;
-        Ok(Map::new(map, self.plan, None))
+        let len = self.analysis.len.unwrap_or(len);
+        let map = self.inner.serialize_map(Some(len))?;
+        Ok(Map::new(map, self.analysis.plan.as_ref(), None))
     }
 
     fn collect_str<T>(self, value: &T) -> Result<S::Ok, S::Error>

@@ -549,7 +549,7 @@ where
 
     fn serialize_struct(self, name: &'static str, len: usize) -> Result<Self::SerializeStruct> {
         #[cfg(feature = "flatten_dunder")]
-        self.push_plan(name, len);
+        self.push_plan(name, len)?;
         #[cfg(not(feature = "flatten_dunder"))]
         let _ = (name, len);
         self.emit_mapping_start()?;
@@ -567,7 +567,7 @@ where
             return Err(error::new(ErrorImpl::SerializeNestedEnum));
         }
         #[cfg(feature = "flatten_dunder")]
-        self.push_plan(variant, len);
+        self.push_plan(variant, len)?;
         #[cfg(not(feature = "flatten_dunder"))]
         let _ = len;
         self.state = State::FoundTag(variant.to_owned());
@@ -769,6 +769,14 @@ where
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` decides to
 /// return an error.
+///
+/// With the `flatten_dunder` feature, dunder-named struct fields are written
+/// as entries of the enclosing mapping, as [`to_value`](crate::to_value) does.
+/// To find keys that repeat, each nested value's `Serialize` impl runs once
+/// more beforehand against a serializer that records only its shape and keys,
+/// so impls must make the same calls every time; a struct whose impl does not
+/// fails with an error. The last value of a repeated key wins, written at its
+/// last position.
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<()>
 where
     W: io::Write,

@@ -210,3 +210,32 @@ fn test_flatten_not_mapping() {
     let expected = dbt_yaml::to_value(&thing).unwrap_err();
     assert_eq!(expected.to_string(), error.to_string());
 }
+
+#[test]
+fn test_flatten_nondeterministic() {
+    // Names itself differently after the first call, which is the probe.
+    struct Fickle {
+        calls: std::cell::Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct as _;
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let name = if calls == 0 { "First" } else { "Later" };
+            let mut state = serializer.serialize_struct(name, 2)?;
+            state.serialize_field("__extra__", &BTreeMap::from([("x", 0)]))?;
+            state.serialize_field("x", &1)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: std::cell::Cell::new(0),
+    };
+    let error = dbt_yaml::to_string(&thing).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
+}

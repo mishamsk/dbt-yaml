@@ -6,7 +6,7 @@
 
 use super::Serializer;
 use crate::error::{self, Error, ErrorImpl};
-use crate::probe::scalars;
+use crate::probe::{scalars, NONDETERMINISTIC};
 use serde::ser::{self, Impossible, Serialize};
 use std::io;
 use std::mem;
@@ -15,9 +15,17 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl<W> Serializer<W> {
     /// Enters a struct, adopting the plan probed for it if there is one.
-    pub(super) fn push_plan(&mut self, name: &'static str, len: usize) {
-        let plan = self.next_plan.take().filter(|plan| plan.matches(name, len));
+    ///
+    /// The plan was probed from the value whose `Serialize` impl is now
+    /// calling `serialize_struct`, so it describes this struct unless the impl
+    /// made different calls when probed.
+    pub(super) fn push_plan(&mut self, name: &'static str, len: usize) -> Result<()> {
+        let plan = self.next_plan.take();
+        if plan.as_ref().is_some_and(|plan| !plan.matches(name, len)) {
+            return Err(ser::Error::custom(NONDETERMINISTIC));
+        }
         self.plans.push(plan.map(|plan| (plan, 0)));
+        Ok(())
     }
 
     pub(super) fn pop_plan(&mut self) {

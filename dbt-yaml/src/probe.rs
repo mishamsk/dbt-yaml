@@ -10,14 +10,21 @@
 //! last is skipped while writing, so the surviving entry sits at its last
 //! position rather than its first.
 //!
+//! The collected keys also give the exact number of entries written, so
+//! maps can be started with their real length.
+//!
 //! This relies on `Serialize` impls making the same calls every time they
-//! run.
+//! run. A struct whose impl makes different calls when probed fails with
+//! [`NONDETERMINISTIC`] rather than writing a wrong plan.
 
 use crate::error::Error;
 use serde::ser::{self, Impossible, Serialize};
 use std::collections::HashMap;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// The error for a `Serialize` impl that made different calls when probed.
+pub(crate) const NONDETERMINISTIC: &str = "Serialize impl made different calls when probed";
 
 /// Expands the `Serializer` methods that the probing and flattening
 /// serializers all treat alike.
@@ -116,13 +123,19 @@ impl Plan {
     pub(crate) fn skips(&self, index: usize) -> bool {
         self.skip.get(index).copied().unwrap_or(false)
     }
+
+    fn skipped(&self) -> usize {
+        self.skip.iter().filter(|skip| **skip).count()
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct Analysis {
     pub(crate) shape: Shape,
-    /// Whether a struct has a dunder field, so its entry count is unknown.
-    pub(crate) has_flatten: bool,
+    /// The number of entries written, when the keys were collected: for a
+    /// struct with dunder fields, or a struct or map with an extra entry.
+    /// Otherwise the length the value itself reports is exact.
+    pub(crate) len: Option<usize>,
     pub(crate) plan: Option<Plan>,
 }
 
@@ -139,11 +152,16 @@ where
         ..Probed::default()
     };
     if value.serialize(Probe::top(&mut probed)).is_err() {
-        return Analysis::default();
+        // Keep the shape: the impl fails the same way when it is written,
+        // and that error is the one to report.
+        return Analysis {
+            shape: probed.shape,
+            ..Analysis::default()
+        };
     }
     let mut analysis = Analysis {
         shape: probed.shape,
-        has_flatten: probed.has_flatten,
+        len: None,
         plan: None,
     };
     let (name, len) = match probed.shape {
@@ -161,6 +179,8 @@ where
     }
     probed.keys.extend(extra.map(Key::Static));
     analysis.plan = Plan::new(name, len, &probed.keys);
+    let skipped = analysis.plan.as_ref().map_or(0, Plan::skipped);
+    analysis.len = Some(probed.keys.len() - skipped);
     analysis
 }
 
