@@ -49,10 +49,18 @@ pub struct Serializer<W> {
     state: State,
     emitter: Emitter<'static>,
     writer: PhantomData<W>,
-    /// Per open struct, the plan of entries to skip; see [`flatten`].
+    /// One entry per open struct: the plan of entries to skip, if any, and
+    /// the index of the struct's next entry; see [`flatten`].
     #[cfg(feature = "flatten_dunder")]
     plans: Vec<Option<(crate::probe::Plan, usize)>>,
-    /// The plan probed for the value about to be serialized.
+    /// Hands a plan from the place that can probe a value to the place that
+    /// writes it. Only `serialize_child` holds `&value`, so it probes and
+    /// stores the plan here before calling `value.serialize(self)`. The
+    /// derived impl then calls `serialize_struct(name, len)`, which gets no
+    /// value but is where the struct's state starts: `push_plan` takes the
+    /// plan from here onto `plans`. A serializer is taken by value, so that
+    /// call comes first and nothing else can refill this slot in between;
+    /// each nested value refills it in its own `serialize_child`.
     #[cfg(feature = "flatten_dunder")]
     next_plan: Option<crate::probe::Plan>,
 }
