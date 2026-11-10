@@ -6,12 +6,16 @@
 
 use super::Serializer;
 use crate::error::{self, Error, ErrorImpl};
-use crate::probe::{scalars, NONDETERMINISTIC};
+use crate::probe::{is_tag, scalars, Key, NONDETERMINISTIC};
 use serde::ser::{self, Impossible, Serialize};
 use std::io;
 use std::mem;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
+
+fn nondeterministic() -> Error {
+    ser::Error::custom(NONDETERMINISTIC)
+}
 
 impl<W> Serializer<W> {
     /// Enters a struct, adopting the plan probed for it if there is one.
@@ -20,28 +24,37 @@ impl<W> Serializer<W> {
     /// calling `serialize_struct`, so it describes this struct unless the impl
     /// made different calls when probed.
     pub(super) fn push_plan(&mut self, name: &'static str, len: usize) -> Result<()> {
+        if self.depth == 0 {
+            // A new document: drop what an earlier failed one left behind.
+            self.plans.clear();
+        }
         let plan = self.next_plan.take();
         if plan.as_ref().is_some_and(|plan| !plan.matches(name, len)) {
-            return Err(ser::Error::custom(NONDETERMINISTIC));
+            return Err(nondeterministic());
         }
         self.plans.push(plan.map(|plan| (plan, 0)));
         Ok(())
     }
 
-    pub(super) fn pop_plan(&mut self) {
-        self.plans.pop();
+    /// Leaves a struct, checking that it wrote as many entries as probed.
+    pub(super) fn pop_plan(&mut self) -> Result<()> {
+        match self.plans.pop() {
+            Some(Some((plan, next))) if next != plan.entries() => Err(nondeterministic()),
+            _ => Ok(()),
+        }
     }
 
     /// Advances past one entry of the current struct, returning true if a
-    /// later entry overwrites it.
-    pub(super) fn skip_entry(&mut self) -> bool {
+    /// later entry overwrites it. `key` is only computed when the struct has
+    /// a plan, to check it against the probed key.
+    pub(super) fn skip_entry(&mut self, key: impl FnOnce() -> Key) -> Result<bool> {
         match self.plans.last_mut() {
             Some(Some((plan, next))) => {
-                let skip = plan.skips(*next);
+                let skip = plan.entry(*next, &key()).ok_or_else(nondeterministic)?;
                 *next += 1;
-                skip
+                Ok(skip)
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 }
@@ -142,10 +155,11 @@ where
         Err(not_mapping())
     }
 
-    fn serialize_map(self, _: Option<usize>) -> Result<FlattenMap<'a, W>> {
+    fn serialize_map(self, len: Option<usize>) -> Result<FlattenMap<'a, W>> {
         Ok(FlattenMap {
             ser: self.ser,
             skip_value: false,
+            check_tag: len == Some(1),
         })
     }
 
@@ -191,6 +205,9 @@ pub(super) struct FlattenMap<'a, W> {
     ser: &'a mut Serializer<W>,
     /// Set when the current key was skipped, so its value is skipped too.
     skip_value: bool,
+    /// Set for a single-entry map, which is a tagged value rather than a
+    /// mapping if its key is a `!tag`.
+    check_tag: bool,
 }
 
 impl<W> ser::SerializeMap for FlattenMap<'_, W>
@@ -204,7 +221,7 @@ where
     where
         K: ?Sized + Serialize,
     {
-        if self.ser.skip_entry() {
+        if self.ser.skip_entry(|| Key::capture(key))? {
             self.skip_value = true;
             return Ok(());
         }
@@ -219,6 +236,19 @@ where
             return Ok(());
         }
         self.ser.serialize_child(value)
+    }
+
+    fn serialize_entry<K, V>(&mut self, key: &K, value: &V) -> Result<()>
+    where
+        K: ?Sized + Serialize,
+        V: ?Sized + Serialize,
+    {
+        // Like the Value serializer, recognize a tag only in a whole entry.
+        if mem::take(&mut self.check_tag) && is_tag(key) {
+            return Err(not_mapping());
+        }
+        self.serialize_key(key)?;
+        self.serialize_value(value)
     }
 
     fn end(self) -> Result<()> {

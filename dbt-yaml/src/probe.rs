@@ -11,15 +11,18 @@
 //! position rather than its first.
 //!
 //! The collected keys also give the exact number of entries written, so
-//! maps can be started with their real length.
+//! such structs can be started with their real length.
 //!
 //! This relies on `Serialize` impls making the same calls every time they
-//! run. A struct whose impl makes different calls when probed fails with
-//! [`NONDETERMINISTIC`] rather than writing a wrong plan.
+//! run. Writers check a struct's name and length, and for a struct with a
+//! plan every key and the entry count, against what the probe saw; a
+//! mismatch fails with [`NONDETERMINISTIC`] rather than writing wrong output.
 
 use crate::error::Error;
+use crate::value::tagged::{self, MaybeTag};
 use serde::ser::{self, Impossible, Serialize};
 use std::collections::HashMap;
+use std::fmt::Display;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -83,22 +86,27 @@ pub(crate) enum Shape {
     TupleVariant {
         variant: &'static str,
     },
-    /// Only recorded when probing for an extra entry.
+    /// Only recorded when probing for an extra entry. A single-entry map
+    /// whose key is a `!tag` is a tagged value, not a mapping, and is
+    /// recorded as `Other`.
     Map,
 }
 
 /// Which entries of one struct are overwritten by a later entry.
+#[derive(Clone)]
 pub(crate) struct Plan {
     /// Name and length of the struct, checked by the YAML serializer.
     #[cfg_attr(not(feature = "flatten_dunder"), allow(dead_code))]
     name: &'static str,
     #[cfg_attr(not(feature = "flatten_dunder"), allow(dead_code))]
     len: usize,
+    /// Every entry's key, flattened entries inlined, in order.
+    keys: Vec<Key>,
     skip: Vec<bool>,
 }
 
 impl Plan {
-    fn new(name: &'static str, len: usize, keys: &[Key]) -> Option<Self> {
+    fn new(name: &'static str, len: usize, keys: Vec<Key>) -> Option<Self> {
         let mut last = HashMap::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
             if let Some(key) = key.as_str() {
@@ -110,7 +118,12 @@ impl Plan {
             .enumerate()
             .map(|(i, key)| key.as_str().is_some_and(|key| last[key] != i))
             .collect();
-        skip.contains(&true).then_some(Plan { name, len, skip })
+        skip.contains(&true).then_some(Plan {
+            name,
+            len,
+            keys,
+            skip,
+        })
     }
 
     /// Whether this plan was probed from a struct with this name and length.
@@ -119,9 +132,16 @@ impl Plan {
         self.name == name && self.len == len
     }
 
-    /// Whether the entry at `index` is overwritten by a later one.
-    pub(crate) fn skips(&self, index: usize) -> bool {
-        self.skip.get(index).copied().unwrap_or(false)
+    /// Whether the entry at `index` is overwritten by a later one, or `None`
+    /// if its key is not the one probed there.
+    pub(crate) fn entry(&self, index: usize, key: &Key) -> Option<bool> {
+        let probed = self.keys.get(index)?;
+        probed.same(key).then(|| self.skip[index])
+    }
+
+    /// The number of entries the probe saw, skipped ones included.
+    pub(crate) fn entries(&self) -> usize {
+        self.keys.len()
     }
 
     fn skipped(&self) -> usize {
@@ -159,6 +179,9 @@ where
             ..Analysis::default()
         };
     }
+    if probed.tagged {
+        return Analysis::default();
+    }
     let mut analysis = Analysis {
         shape: probed.shape,
         len: None,
@@ -178,9 +201,9 @@ where
         return analysis;
     }
     probed.keys.extend(extra.map(Key::Static));
-    analysis.plan = Plan::new(name, len, &probed.keys);
-    let skipped = analysis.plan.as_ref().map_or(0, Plan::skipped);
-    analysis.len = Some(probed.keys.len() - skipped);
+    let entries = probed.keys.len();
+    analysis.plan = Plan::new(name, len, probed.keys);
+    analysis.len = Some(entries - analysis.plan.as_ref().map_or(0, Plan::skipped));
     analysis
 }
 
@@ -194,10 +217,22 @@ where
     analyze(value, None).plan
 }
 
+/// Whether `key`, as the first key of a single-entry map, makes the map a
+/// tagged value for the Value serializer: it is written with `collect_str`
+/// and reads as a `!tag`.
+pub(crate) fn is_tag<K>(key: &K) -> bool
+where
+    K: ?Sized + Serialize,
+{
+    key.serialize(IsTag).unwrap_or(false)
+}
+
 #[derive(Default)]
 struct Probed {
     shape: Shape,
     has_flatten: bool,
+    /// Whether a top-level map turned out to be a tagged value.
+    tagged: bool,
     /// Whether to record the keys of a top-level map.
     top_map: bool,
     /// Whether to record keys, or only look for dunder fields.
@@ -206,7 +241,9 @@ struct Probed {
     keys: Vec<Key>,
 }
 
-enum Key {
+/// A key as the Value serializer would see it.
+#[derive(Clone)]
+pub(crate) enum Key {
     Static(&'static str),
     Owned(String),
     /// A key that is not a string; never treated as colliding.
@@ -214,11 +251,28 @@ enum Key {
 }
 
 impl Key {
+    /// Captures a map key as the string the Value serializer would turn it
+    /// into, or [`Key::Opaque`].
+    pub(crate) fn capture<K>(key: &K) -> Key
+    where
+        K: ?Sized + Serialize,
+    {
+        key.serialize(KeyCapture).unwrap_or(Key::Opaque)
+    }
+
     fn as_str(&self) -> Option<&str> {
         match self {
             Key::Static(key) => Some(key),
             Key::Owned(key) => Some(key),
             Key::Opaque => None,
+        }
+    }
+
+    fn same(&self, other: &Key) -> bool {
+        match (self.as_str(), other.as_str()) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
         }
     }
 }
@@ -327,18 +381,22 @@ impl<'a> ser::Serializer for Probe<'a> {
         Ok(Ignore)
     }
 
-    fn serialize_map(self, _: Option<usize>) -> Result<ProbeMap<'a>> {
+    fn serialize_map(self, len: Option<usize>) -> Result<ProbeMap<'a>> {
         // A flattened map contributes entries to the probed struct; a
         // top-level one only matters when an extra entry is appended to it.
-        let active = if self.flatten {
-            true
+        let (active, check_tag) = if self.flatten {
+            (true, false)
         } else {
             self.out.shape = Shape::Map;
-            self.out.top_map && self.out.collect
+            (
+                self.out.top_map && self.out.collect,
+                self.out.top_map && len == Some(1),
+            )
         };
         Ok(ProbeMap {
             out: self.out,
             active,
+            check_tag,
         })
     }
 
@@ -372,7 +430,7 @@ impl<'a> ser::Serializer for Probe<'a> {
 
     fn collect_str<T>(self, _: &T) -> Result<()>
     where
-        T: ?Sized + std::fmt::Display,
+        T: ?Sized + Display,
     {
         Ok(())
     }
@@ -441,6 +499,9 @@ impl ser::SerializeStructVariant for ProbeStruct<'_> {
 struct ProbeMap<'a> {
     out: &'a mut Probed,
     active: bool,
+    /// Whether this is a top-level single-entry map that may be a tagged
+    /// value.
+    check_tag: bool,
 }
 
 impl ser::SerializeMap for ProbeMap<'_> {
@@ -452,8 +513,7 @@ impl ser::SerializeMap for ProbeMap<'_> {
         K: ?Sized + Serialize,
     {
         if self.active {
-            let key = key.serialize(KeyCapture).unwrap_or(Key::Opaque);
-            self.out.keys.push(key);
+            self.out.keys.push(Key::capture(key));
         }
         Ok(())
     }
@@ -463,6 +523,19 @@ impl ser::SerializeMap for ProbeMap<'_> {
         V: ?Sized + Serialize,
     {
         Ok(())
+    }
+
+    fn serialize_entry<K, V>(&mut self, key: &K, value: &V) -> Result<()>
+    where
+        K: ?Sized + Serialize,
+        V: ?Sized + Serialize,
+    {
+        // The Value serializer only recognizes a tag in a whole entry.
+        if std::mem::take(&mut self.check_tag) && is_tag(key) {
+            self.out.tagged = true;
+        }
+        self.serialize_key(key)?;
+        self.serialize_value(value)
     }
 
     fn end(self) -> Result<()> {
@@ -552,7 +625,46 @@ impl ser::Serializer for KeyCapture {
     type SerializeStruct = Impossible<Key, Error>;
     type SerializeStructVariant = Impossible<Key, Error>;
 
-    scalars!(Ok(Key::Opaque));
+    scalars!(@ Ok(Key::Opaque);
+        serialize_bool: bool,
+        serialize_i8: i8,
+        serialize_i16: i16,
+        serialize_i32: i32,
+        serialize_i64: i64,
+        serialize_u8: u8,
+        serialize_u16: u16,
+        serialize_u32: u32,
+        serialize_u64: u64,
+        serialize_f32: f32,
+        serialize_f64: f64,
+        serialize_bytes: &[u8],
+        serialize_unit_struct: &'static str
+    );
+
+    fn serialize_unit(self) -> Result<Key> {
+        Ok(Key::Opaque)
+    }
+
+    fn serialize_none(self) -> Result<Key> {
+        Ok(Key::Opaque)
+    }
+
+    fn serialize_i128(self, v: i128) -> Result<Key> {
+        // The Value serializer turns integers wider than 64 bits into strings.
+        Ok(if i64::try_from(v).is_ok() || u64::try_from(v).is_ok() {
+            Key::Opaque
+        } else {
+            Key::Owned(v.to_string())
+        })
+    }
+
+    fn serialize_u128(self, v: u128) -> Result<Key> {
+        Ok(if u64::try_from(v).is_ok() {
+            Key::Opaque
+        } else {
+            Key::Owned(v.to_string())
+        })
+    }
 
     fn serialize_char(self, v: char) -> Result<Key> {
         Ok(Key::Owned(v.to_string()))
@@ -566,10 +678,16 @@ impl ser::Serializer for KeyCapture {
         Ok(Key::Static(variant))
     }
 
-    fn serialize_newtype_struct<T>(self, _: &'static str, value: &T) -> Result<Key>
+    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> Result<Key>
     where
         T: ?Sized + Serialize,
     {
+        // A timestamp is a `Value::Timestamp` key, distinct from a string.
+        #[cfg(feature = "yaml_11")]
+        if name == crate::timestamp::TOKEN {
+            return Ok(Key::Opaque);
+        }
+        let _ = name;
         value.serialize(self)
     }
 
@@ -641,4 +759,112 @@ impl ser::Serializer for KeyCapture {
 /// Signals a compound key; the probe records it as [`Key::Opaque`].
 fn opaque_key() -> Error {
     ser::Error::custom("compound key")
+}
+
+/// Answers whether a key is written with `collect_str` as a `!tag`.
+struct IsTag;
+
+impl ser::Serializer for IsTag {
+    type Ok = bool;
+    type Error = Error;
+
+    type SerializeSeq = Impossible<bool, Error>;
+    type SerializeTuple = Impossible<bool, Error>;
+    type SerializeTupleStruct = Impossible<bool, Error>;
+    type SerializeTupleVariant = Impossible<bool, Error>;
+    type SerializeMap = Impossible<bool, Error>;
+    type SerializeStruct = Impossible<bool, Error>;
+    type SerializeStructVariant = Impossible<bool, Error>;
+
+    scalars!(Ok(false));
+
+    fn serialize_char(self, _: char) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn serialize_str(self, _: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn serialize_unit_variant(self, _: &'static str, _: u32, _: &'static str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn serialize_newtype_struct<T>(self, _: &'static str, _: &T) -> Result<bool>
+    where
+        T: ?Sized + Serialize,
+    {
+        Ok(false)
+    }
+
+    fn serialize_newtype_variant<T>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: &T,
+    ) -> Result<bool>
+    where
+        T: ?Sized + Serialize,
+    {
+        Ok(false)
+    }
+
+    fn serialize_some<T>(self, _: &T) -> Result<bool>
+    where
+        T: ?Sized + Serialize,
+    {
+        Ok(false)
+    }
+
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq> {
+        Err(opaque_key())
+    }
+
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple> {
+        Err(opaque_key())
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleStruct> {
+        Err(opaque_key())
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleVariant> {
+        Err(opaque_key())
+    }
+
+    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap> {
+        Err(opaque_key())
+    }
+
+    fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self::SerializeStruct> {
+        Err(opaque_key())
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStructVariant> {
+        Err(opaque_key())
+    }
+
+    fn collect_str<T>(self, value: &T) -> Result<bool>
+    where
+        T: ?Sized + Display,
+    {
+        Ok(matches!(tagged::check_for_tag(value), MaybeTag::Tag(_)))
+    }
 }

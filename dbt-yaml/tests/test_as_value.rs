@@ -2,7 +2,7 @@ use dbt_yaml::{AsValue, Value};
 use indoc::indoc;
 use serde::ser::{Impossible, SerializeStruct as _};
 use serde_derive::Serialize;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 // serde_json is a dev-dependency only for these tests: `AsValue` must behave
@@ -701,7 +701,7 @@ fn test_flatten_map_len() {
 
 #[test]
 fn test_nondeterministic() {
-    // Names itself differently after the first call, which is the probe.
+    // Names itself differently on every call after the first.
     struct Fickle {
         calls: Cell<u32>,
     }
@@ -712,6 +712,191 @@ fn test_nondeterministic() {
             let name = if calls == 0 { "First" } else { "Later" };
             let mut state = serializer.serialize_struct(name, 1)?;
             state.serialize_field("x", &1)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: Cell::new(0),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
+}
+
+/// Serializes as a map with the entries in the given order.
+#[cfg(feature = "flatten_dunder")]
+struct Pairs(Vec<(&'static str, u32)>);
+
+#[cfg(feature = "flatten_dunder")]
+impl serde::Serialize for Pairs {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|(key, value)| (key, value)))
+    }
+}
+
+#[test]
+fn test_with_entry_ignored() {
+    #[derive(Serialize)]
+    enum Variant {
+        Size(u32),
+        Rgb(u8, u8),
+        Color { r: u8, g: u8 },
+    }
+    let things = [
+        Variant::Size(1),
+        Variant::Rgb(1, 2),
+        Variant::Color { r: 1, g: 2 },
+    ];
+    for thing in &things {
+        let expected = serde_json::to_string(&dbt_yaml::to_value(thing).unwrap()).unwrap();
+        let serialized =
+            serde_json::to_string(&AsValue(thing).with_entry("r", "replaced")).unwrap();
+        assert_eq!(expected, serialized);
+    }
+
+    let thing: Value = dbt_yaml::from_str("!Tag v").unwrap();
+    let serialized = dbt_yaml::to_string(&AsValue(&thing).with_entry("r", "replaced")).unwrap();
+    let yaml = indoc! {"
+        !Tag v
+    "};
+    assert_eq!(yaml, serialized);
+}
+
+#[test]
+fn test_single_use_serialize() {
+    // Hands out its elements once, as an iterator would.
+    struct Once(RefCell<Option<Vec<u32>>>);
+
+    impl serde::Serialize for Once {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_seq(self.0.borrow_mut().take().unwrap_or_default())
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Outer {
+        items: Once,
+    }
+
+    let thing = Outer {
+        items: Once(RefCell::new(Some(vec![1, 2]))),
+    };
+    let serialized = serde_json::to_string(&AsValue(&thing)).unwrap();
+    assert_eq!(r#"{"items":[1,2]}"#, serialized);
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_tagged_value() {
+    #[derive(Serialize)]
+    struct Outer {
+        name: &'static str,
+        __extra__: Value,
+    }
+    let thing = Outer {
+        name: "box",
+        __extra__: dbt_yaml::from_str("!Tag v").unwrap(),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    let expected = dbt_yaml::to_value(&thing).unwrap_err();
+    assert_eq!(expected.to_string(), error.to_string());
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_wide_integer_key() {
+    #[derive(Serialize)]
+    struct Outer {
+        __numbers__: BTreeMap<u128, &'static str>,
+        __names__: BTreeMap<&'static str, &'static str>,
+    }
+    // The Value serializer turns the number into the same string key.
+    let thing = Outer {
+        __numbers__: BTreeMap::from([(u128::MAX, "number")]),
+        __names__: BTreeMap::from([("340282366920938463463374607431768211455", "name")]),
+    };
+    let yaml = indoc! {"
+        '340282366920938463463374607431768211455': name
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[cfg(all(feature = "flatten_dunder", feature = "yaml_11"))]
+#[test]
+fn test_flatten_timestamp_key() {
+    #[derive(Serialize)]
+    struct Outer {
+        __dates__: Value,
+        __names__: Value,
+    }
+    // A timestamp key and a string key that reads the same are distinct.
+    let thing = Outer {
+        __dates__: dbt_yaml::from_str("2002-01-01: date").unwrap(),
+        __names__: dbt_yaml::from_str("'2002-01-01': name").unwrap(),
+    };
+    let yaml = indoc! {"
+        2002-01-01: date
+        '2002-01-01': name
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_nondeterministic_keys() {
+    // Lists its entries in another order on the first call, which is the one
+    // written.
+    struct Fickle {
+        calls: Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let extra = if calls == 0 {
+                Pairs(vec![("y", 1), ("x", 2)])
+            } else {
+                Pairs(vec![("x", 2), ("y", 1)])
+            };
+            let mut state = serializer.serialize_struct("Fickle", 2)?;
+            state.serialize_field("__extra__", &extra)?;
+            state.serialize_field("x", &3)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: Cell::new(0),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_nondeterministic_count() {
+    // Has one more entry on the first call, which is the one written.
+    struct Fickle {
+        calls: Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let extra = if calls == 0 {
+                Pairs(vec![("a", 1), ("b", 2)])
+            } else {
+                Pairs(vec![("a", 1)])
+            };
+            let mut state = serializer.serialize_struct("Fickle", 2)?;
+            state.serialize_field("__extra__", &extra)?;
+            state.serialize_field("z", &3)?;
             state.end()
         }
     }
