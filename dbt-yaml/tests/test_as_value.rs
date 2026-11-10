@@ -1,6 +1,8 @@
 use dbt_yaml::{AsValue, Value};
 use indoc::indoc;
+use serde::ser::{Impossible, SerializeStruct as _};
 use serde_derive::Serialize;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 // serde_json is a dev-dependency only for these tests: `AsValue` must behave
@@ -458,4 +460,417 @@ fn test_flatten_not_mapping() {
     let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
     let expected = dbt_yaml::to_value(&thing).unwrap_err();
     assert_eq!(expected.to_string(), error.to_string());
+}
+
+/// Reports the length a value's top-level map is started with.
+struct MapLen;
+
+struct MapLenEntries(Option<usize>);
+
+type MapLenError = serde::de::value::Error;
+
+fn not_a_map<T>() -> Result<T, MapLenError> {
+    Err(serde::ser::Error::custom("not a map"))
+}
+
+impl serde::Serializer for MapLen {
+    type Ok = Option<usize>;
+    type Error = MapLenError;
+    type SerializeSeq = Impossible<Self::Ok, MapLenError>;
+    type SerializeTuple = Impossible<Self::Ok, MapLenError>;
+    type SerializeTupleStruct = Impossible<Self::Ok, MapLenError>;
+    type SerializeTupleVariant = Impossible<Self::Ok, MapLenError>;
+    type SerializeMap = MapLenEntries;
+    type SerializeStruct = Impossible<Self::Ok, MapLenError>;
+    type SerializeStructVariant = Impossible<Self::Ok, MapLenError>;
+
+    fn serialize_map(self, len: Option<usize>) -> Result<MapLenEntries, MapLenError> {
+        Ok(MapLenEntries(len))
+    }
+
+    fn serialize_bool(self, _: bool) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i64(self, _: i64) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i8(self, _: i8) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i16(self, _: i16) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_i32(self, _: i32) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u8(self, _: u8) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u16(self, _: u16) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u32(self, _: u32) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_u64(self, _: u64) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_f32(self, _: f32) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_f64(self, _: f64) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_char(self, _: char) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_str(self, _: &str) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_bytes(self, _: &[u8]) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_none(self) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_some<T: ?Sized + serde::Serialize>(self, _: &T) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_unit(self) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_unit_struct(self, _: &'static str) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_unit_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+    ) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_newtype_struct<T: ?Sized + serde::Serialize>(
+        self,
+        _: &'static str,
+        _: &T,
+    ) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_newtype_variant<T: ?Sized + serde::Serialize>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: &T,
+    ) -> Result<Self::Ok, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_tuple_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleStruct, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleVariant, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStruct, MapLenError> {
+        not_a_map()
+    }
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStructVariant, MapLenError> {
+        not_a_map()
+    }
+}
+
+impl serde::ser::SerializeMap for MapLenEntries {
+    type Ok = Option<usize>;
+    type Error = MapLenError;
+
+    fn serialize_key<T: ?Sized + serde::Serialize>(&mut self, _: &T) -> Result<(), MapLenError> {
+        Ok(())
+    }
+    fn serialize_value<T: ?Sized + serde::Serialize>(&mut self, _: &T) -> Result<(), MapLenError> {
+        Ok(())
+    }
+    fn end(self) -> Result<Self::Ok, MapLenError> {
+        Ok(self.0)
+    }
+}
+
+fn map_len<T: serde::Serialize>(thing: &T) -> Option<usize> {
+    thing.serialize(MapLen).unwrap()
+}
+
+#[test]
+fn test_map_len() {
+    #[derive(Serialize)]
+    struct Basic {
+        x: u32,
+        y: u32,
+    }
+    let thing = Basic { x: 1, y: 2 };
+    assert_eq!(Some(2), map_len(&AsValue(&thing)));
+    assert_eq!(Some(3), map_len(&AsValue(&thing).with_entry("z", "three")));
+    assert_eq!(Some(2), map_len(&AsValue(&thing).with_entry("y", "two")));
+
+    let thing = BTreeMap::from([("x", 1), ("y", 2)]);
+    assert_eq!(Some(2), map_len(&AsValue(&thing)));
+    assert_eq!(Some(3), map_len(&AsValue(&thing).with_entry("z", &3)));
+    assert_eq!(Some(2), map_len(&AsValue(&thing).with_entry("y", &3)));
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_map_len() {
+    #[derive(Serialize)]
+    struct Outer {
+        name: &'static str,
+        __inner__: Inner,
+        __extra__: BTreeMap<&'static str, &'static str>,
+    }
+    #[derive(Serialize)]
+    struct Inner {
+        width: u32,
+        height: u32,
+    }
+    let thing = Outer {
+        name: "box",
+        __inner__: Inner {
+            width: 1,
+            height: 2,
+        },
+        __extra__: BTreeMap::from([("color", "red"), ("shape", "square")]),
+    };
+    let expected = map_len(&dbt_yaml::to_value(&thing).unwrap());
+    assert_eq!(Some(5), expected);
+    assert_eq!(expected, map_len(&AsValue(&thing)));
+
+    // A repeated key is counted once.
+    let thing = Outer {
+        name: "box",
+        __inner__: Inner {
+            width: 1,
+            height: 2,
+        },
+        __extra__: BTreeMap::from([("width", "wide")]),
+    };
+    let expected = map_len(&dbt_yaml::to_value(&thing).unwrap());
+    assert_eq!(Some(3), expected);
+    assert_eq!(expected, map_len(&AsValue(&thing)));
+}
+
+#[test]
+fn test_nondeterministic() {
+    // Names itself differently on every call after the first.
+    struct Fickle {
+        calls: Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let name = if calls == 0 { "First" } else { "Later" };
+            let mut state = serializer.serialize_struct(name, 1)?;
+            state.serialize_field("x", &1)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: Cell::new(0),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
+}
+
+/// Serializes as a map with the entries in the given order.
+#[cfg(feature = "flatten_dunder")]
+struct Pairs(Vec<(&'static str, u32)>);
+
+#[cfg(feature = "flatten_dunder")]
+impl serde::Serialize for Pairs {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|(key, value)| (key, value)))
+    }
+}
+
+#[test]
+fn test_with_entry_ignored() {
+    #[derive(Serialize)]
+    enum Variant {
+        Size(u32),
+        Rgb(u8, u8),
+        Color { r: u8, g: u8 },
+    }
+    let things = [
+        Variant::Size(1),
+        Variant::Rgb(1, 2),
+        Variant::Color { r: 1, g: 2 },
+    ];
+    for thing in &things {
+        let expected = serde_json::to_string(&dbt_yaml::to_value(thing).unwrap()).unwrap();
+        let serialized =
+            serde_json::to_string(&AsValue(thing).with_entry("r", "replaced")).unwrap();
+        assert_eq!(expected, serialized);
+    }
+
+    let thing: Value = dbt_yaml::from_str("!Tag v").unwrap();
+    let serialized = dbt_yaml::to_string(&AsValue(&thing).with_entry("r", "replaced")).unwrap();
+    let yaml = indoc! {"
+        !Tag v
+    "};
+    assert_eq!(yaml, serialized);
+}
+
+#[test]
+fn test_single_use_serialize() {
+    // Hands out its elements once, as an iterator would.
+    struct Once(RefCell<Option<Vec<u32>>>);
+
+    impl serde::Serialize for Once {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_seq(self.0.borrow_mut().take().unwrap_or_default())
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Outer {
+        items: Once,
+    }
+
+    let thing = Outer {
+        items: Once(RefCell::new(Some(vec![1, 2]))),
+    };
+    let serialized = serde_json::to_string(&AsValue(&thing)).unwrap();
+    assert_eq!(r#"{"items":[1,2]}"#, serialized);
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_tagged_value() {
+    #[derive(Serialize)]
+    struct Outer {
+        name: &'static str,
+        __extra__: Value,
+    }
+    let thing = Outer {
+        name: "box",
+        __extra__: dbt_yaml::from_str("!Tag v").unwrap(),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    let expected = dbt_yaml::to_value(&thing).unwrap_err();
+    assert_eq!(expected.to_string(), error.to_string());
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_wide_integer_key() {
+    #[derive(Serialize)]
+    struct Outer {
+        __numbers__: BTreeMap<u128, &'static str>,
+        __names__: BTreeMap<&'static str, &'static str>,
+    }
+    // The Value serializer turns the number into the same string key.
+    let thing = Outer {
+        __numbers__: BTreeMap::from([(u128::MAX, "number")]),
+        __names__: BTreeMap::from([("340282366920938463463374607431768211455", "name")]),
+    };
+    let yaml = indoc! {"
+        '340282366920938463463374607431768211455': name
+    "};
+    test_as_value(&thing, yaml);
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_nondeterministic_keys() {
+    // Lists its entries in another order on the first call, which is the one
+    // written.
+    struct Fickle {
+        calls: Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let extra = if calls == 0 {
+                Pairs(vec![("y", 1), ("x", 2)])
+            } else {
+                Pairs(vec![("x", 2), ("y", 1)])
+            };
+            let mut state = serializer.serialize_struct("Fickle", 2)?;
+            state.serialize_field("__extra__", &extra)?;
+            state.serialize_field("x", &3)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: Cell::new(0),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
+fn test_flatten_nondeterministic_count() {
+    // Has one more entry on the first call, which is the one written.
+    struct Fickle {
+        calls: Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let extra = if calls == 0 {
+                Pairs(vec![("a", 1), ("b", 2)])
+            } else {
+                Pairs(vec![("a", 1)])
+            };
+            let mut state = serializer.serialize_struct("Fickle", 2)?;
+            state.serialize_field("__extra__", &extra)?;
+            state.serialize_field("z", &3)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: Cell::new(0),
+    };
+    let error = serde_json::to_string(&AsValue(&thing)).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
 }

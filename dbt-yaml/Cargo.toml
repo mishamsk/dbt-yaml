@@ -33,6 +33,8 @@ schemars = ["dep:schemars", "dep:dbt-yaml_schemars_derive"]
 anyhow = "1.0.79"
 indoc = "2.0"
 serde_derive = "1.0.195"
+# Only for tests: checks that `AsValue` writes the same through a serde
+# serializer other than this crate's own.
 serde_json = "1.0"
 
 [package.metadata.docs.rs]

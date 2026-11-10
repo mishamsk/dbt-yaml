@@ -210,3 +210,90 @@ fn test_flatten_not_mapping() {
     let expected = dbt_yaml::to_value(&thing).unwrap_err();
     assert_eq!(expected.to_string(), error.to_string());
 }
+
+#[test]
+fn test_flatten_nondeterministic() {
+    // Names itself differently after the first call, which is the probe.
+    struct Fickle {
+        calls: std::cell::Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct as _;
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let name = if calls == 0 { "First" } else { "Later" };
+            let mut state = serializer.serialize_struct(name, 2)?;
+            state.serialize_field("__extra__", &BTreeMap::from([("x", 0)]))?;
+            state.serialize_field("x", &1)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: std::cell::Cell::new(0),
+    };
+    let error = dbt_yaml::to_string(&thing).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
+}
+
+#[test]
+fn test_flatten_tagged_value() {
+    #[derive(Serialize)]
+    struct Outer {
+        name: &'static str,
+        __extra__: Value,
+    }
+    let thing = Outer {
+        name: "box",
+        __extra__: dbt_yaml::from_str("!Tag v").unwrap(),
+    };
+    let error = dbt_yaml::to_string(&thing).unwrap_err();
+    let expected = dbt_yaml::to_value(&thing).unwrap_err();
+    assert_eq!(expected.to_string(), error.to_string());
+}
+
+#[test]
+fn test_flatten_nondeterministic_keys() {
+    // Serializes as a map with the entries in the given order.
+    struct Pairs(Vec<(&'static str, u32)>);
+
+    impl serde::Serialize for Pairs {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_map(self.0.iter().map(|(key, value)| (key, value)))
+        }
+    }
+
+    // Lists its entries in another order once probed twice.
+    struct Fickle {
+        calls: std::cell::Cell<u32>,
+    }
+
+    impl serde::Serialize for Fickle {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct as _;
+            let calls = self.calls.replace(self.calls.get() + 1);
+            let extra = if calls < 2 {
+                Pairs(vec![("x", 2), ("y", 1)])
+            } else {
+                Pairs(vec![("y", 1), ("x", 2)])
+            };
+            let mut state = serializer.serialize_struct("Fickle", 2)?;
+            state.serialize_field("__extra__", &extra)?;
+            state.serialize_field("x", &3)?;
+            state.end()
+        }
+    }
+
+    let thing = Fickle {
+        calls: std::cell::Cell::new(0),
+    };
+    let error = dbt_yaml::to_string(&thing).unwrap_err();
+    assert_eq!(
+        "Serialize impl made different calls when probed",
+        error.to_string()
+    );
+}
