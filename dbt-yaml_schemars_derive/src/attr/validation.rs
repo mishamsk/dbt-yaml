@@ -527,7 +527,7 @@ fn str_or_num_to_expr(cx: &Ctxt, meta_item_name: &str, expr: Expr) -> Option<Exp
                 &expr,
                 format!(
                     "expected `{}` to be a string or number literal, not {:?}",
-                    meta_item_name, &expr
+                    meta_item_name, expr
                 ),
             );
             None

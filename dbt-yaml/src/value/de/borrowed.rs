@@ -1538,7 +1538,7 @@ impl<'de> MapAccess<'de> for StructRefDeserializer<'de, '_, '_, '_> {
             None if self.has_unprocessed_flatten_keys() => {
                 self.flatten_keys_done += 1;
 
-                let flattened = self.rest.drain(..).collect::<Vec<_>>();
+                let flattened = std::mem::take(&mut self.rest);
                 // Flatten keys are always dunder-wrapped; do not add them to the path.
                 let path = self.path;
 
