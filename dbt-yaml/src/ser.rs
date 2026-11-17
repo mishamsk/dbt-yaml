@@ -691,6 +691,10 @@ where
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` decides to
 /// return an error.
+///
+/// Dunder-named fields are written as ordinary keys. To write `value` as its
+/// [`to_value`](crate::to_value) result would be written, with dunder fields
+/// flattened, serialize [`AsValue(value)`](crate::AsValue) instead.
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<()>
 where
     W: io::Write,
