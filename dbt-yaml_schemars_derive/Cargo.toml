@@ -8,7 +8,7 @@ license = "MIT"
 name = "dbt-yaml_schemars_derive"
 repository = "https://github.com/sdf-labs/dbt-yaml"
 rust-version = "1.88"
-version = "0.9.6"
+version = "0.9.7"
 
 [lib]
 proc-macro = true

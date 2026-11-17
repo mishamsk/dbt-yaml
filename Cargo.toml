@@ -8,5 +8,5 @@ resolver = "2"
 
 [workspace.dependencies]
 "dbt-yaml" = { path = "dbt-yaml" }
-"dbt-yaml_derive" = { version = "0.9.6", path = "dbt-yaml_derive" }
-"dbt-yaml_schemars_derive" = { version = "0.9.6", path = "dbt-yaml_schemars_derive" }
+"dbt-yaml_derive" = { version = "0.9.7", path = "dbt-yaml_derive" }
+"dbt-yaml_schemars_derive" = { version = "0.9.7", path = "dbt-yaml_schemars_derive" }
