@@ -748,6 +748,108 @@ fn test_multi_flatten_fields() {
 
 #[cfg(feature = "flatten_dunder")]
 #[test]
+fn test_multi_flatten_preserves_unused_entries() {
+    #[derive(Deserialize, PartialEq, Eq, Debug)]
+    struct Root {
+        config: Config,
+    }
+
+    #[derive(Deserialize, PartialEq, Eq, Debug)]
+    struct Config {
+        __first__: First,
+        __second__: Second,
+        __last__: Last,
+    }
+
+    #[derive(Deserialize, PartialEq, Eq, Debug)]
+    struct First {
+        __nested__: Nested,
+    }
+
+    #[derive(Deserialize, PartialEq, Eq, Debug)]
+    struct Nested {
+        first: u64,
+    }
+
+    #[derive(Deserialize, PartialEq, Eq, Debug)]
+    struct Second {
+        payload: Verbatim<Value>,
+    }
+
+    #[derive(Deserialize, PartialEq, Eq, Debug)]
+    struct Last {
+        section: Section,
+    }
+
+    #[derive(Deserialize, PartialEq, Eq, Debug)]
+    struct Section {
+        known: bool,
+    }
+
+    let value = dbt_yaml::from_str::<Value>(indoc! {"
+        config:
+          before: 11
+          first: 1
+          payload:
+            - keep this string allocation
+          section:
+            known: true
+            ignored: 12
+          after: 13
+    "})
+    .unwrap();
+    let payload = &value["config"]["payload"][0];
+    let payload_ptr = payload.as_str().unwrap().as_ptr();
+    let payload_span = payload.span().clone();
+    let record_unused =
+        |unused: &mut Vec<_>, path: dbt_yaml::Path<'_>, key: &Value, value: &Value| {
+            unused.push((
+                path.to_string(),
+                key.as_str().unwrap().to_owned(),
+                value.as_u64().unwrap(),
+                value.span().start.line,
+            ));
+        };
+    let transform = |value: &Value| Ok((value.as_u64() == Some(1)).then(|| Value::from(10)));
+
+    let mut borrowed_unused = Vec::new();
+    let borrowed: Root = value
+        .to_typed(
+            |path, key, value| record_unused(&mut borrowed_unused, path, key, value),
+            transform,
+        )
+        .unwrap();
+    let mut owned_unused = Vec::new();
+    let owned: Root = value
+        .into_typed(
+            |path, key, value| record_unused(&mut owned_unused, path, key, value),
+            transform,
+        )
+        .unwrap();
+    assert_eq!(borrowed, owned);
+    assert_eq!(borrowed_unused, owned_unused);
+    assert_eq!(owned.config.__first__.__nested__.first, 10);
+    assert_eq!(
+        owned_unused
+            .iter()
+            .map(|(path, key, value, line)| (path.as_str(), key.as_str(), *value, *line))
+            .collect::<Vec<_>>(),
+        [
+            ("config.before", "before", 11, 2),
+            ("config.section.ignored", "ignored", 12, 8),
+            ("config.after", "after", 13, 9),
+        ],
+    );
+
+    let payload = &owned.config.__second__.payload[0];
+    assert_eq!(payload.span(), &payload_span);
+    // The nested group forwards the payload while it still owns the original
+    // string. Cloning it at that point would allocate a different buffer.
+    assert_eq!(payload.as_str().unwrap().as_ptr(), payload_ptr);
+}
+
+#[cfg(feature = "flatten_dunder")]
+#[test]
 fn test_multi_flatten_shouldbe() {
     use dbt_yaml::ShouldBe;
 
@@ -1105,7 +1207,7 @@ fn test_untagged_enum_flatten_dunder() {
         y: '5'
     "};
     let value = dbt_yaml::from_str::<Value>(yaml).unwrap();
-    let (untagged, unused_keys) = deserialize_value::<Untagged<Thing2>>(value, |v| {
+    let transform = |v: &Value| {
         if v.is_u64() {
             Ok(Some(Value::from(v.as_u64().unwrap() + 100)))
         } else if v.is_bool() {
@@ -1113,7 +1215,21 @@ fn test_untagged_enum_flatten_dunder() {
         } else {
             Ok(None)
         }
-    });
+    };
+
+    let owned: Thing2 = value
+        .clone()
+        .into_typed(
+            |path, _, _| panic!("unexpected unused key at {path}"),
+            transform,
+        )
+        .unwrap();
+    assert_eq!(
+        owned.__rest__,
+        HashMap::from([("y".to_string(), "5".to_string())])
+    );
+
+    let (untagged, unused_keys) = deserialize_value::<Untagged<Thing2>>(value, transform);
     assert!(unused_keys.is_empty());
     assert_eq!(
         untagged,

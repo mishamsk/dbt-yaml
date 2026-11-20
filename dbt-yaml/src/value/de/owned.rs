@@ -1,4 +1,4 @@
-use std::{collections::HashSet, vec};
+use std::{cell::RefCell, collections::HashSet, vec};
 
 use serde::{
     de::{
@@ -20,6 +20,34 @@ use crate::{
 };
 
 use super::{FieldTransformer, UnusedKeyCallback};
+
+type FlattenRest = RefCell<Vec<(Value, Value)>>;
+
+struct UnusedKeys<'u> {
+    callback: Option<UnusedKeyCallback<'u>>,
+    // The struct iterator can move entries into this sink. Deserializers that
+    // only report borrowed entries use the callback to collect them instead.
+    sink: Option<&'u FlattenRest>,
+}
+
+impl<'u> UnusedKeys<'u> {
+    fn from_callback(callback: Option<UnusedKeyCallback<'u>>) -> Self {
+        Self {
+            callback,
+            sink: None,
+        }
+    }
+
+    fn reborrow(&mut self) -> UnusedKeys<'_> {
+        UnusedKeys {
+            callback: self
+                .callback
+                .as_deref_mut()
+                .map(|cb| &mut *cb as UnusedKeyCallback<'_>),
+            sink: self.sink,
+        }
+    }
+}
 
 fn visit_sequence<'de, 'a, 'u, 'f, V>(
     sequence: Sequence,
@@ -78,7 +106,7 @@ fn visit_struct<'de, 'a, 'u, 'f, V>(
     current_path: Path<'a>,
     visitor: V,
     known_keys: &'static [&'static str],
-    unused_key_callback: Option<UnusedKeyCallback<'u>>,
+    unused_keys: UnusedKeys<'u>,
     field_transformer: Option<FieldTransformer<'f>>,
 ) -> Result<V::Value, Error>
 where
@@ -86,14 +114,14 @@ where
 {
     let len = mapping.len();
     let mut deserializer = StructDeserializer::new(
-        mapping,
+        mapping.into_iter(),
         current_path,
         known_keys,
-        unused_key_callback,
+        unused_keys,
         field_transformer,
     );
     let map = visitor.visit_map(&mut deserializer)?;
-    let remaining = deserializer.iter.len() + deserializer.rest.len();
+    let remaining = deserializer.iter.len() + deserializer.rest.get_mut().len();
     if remaining == 0 {
         Ok(map)
     } else {
@@ -335,7 +363,7 @@ impl<'de> Deserializer<'de> for Value {
 pub struct ValueDeserializer<'a, 'u, 'f> {
     value: Value,
     path: Path<'a>,
-    unused_key_callback: Option<UnusedKeyCallback<'u>>,
+    unused_keys: UnusedKeys<'u>,
     field_transformer: Option<FieldTransformer<'f>>,
     // Flag indicating whether the value has been already been transformed by
     // field_transformer:
@@ -355,12 +383,26 @@ impl<'a, 'u, 'f> ValueDeserializer<'a, 'u, 'f> {
         unused_key_callback: Option<UnusedKeyCallback<'u>>,
         field_transformer: Option<FieldTransformer<'f>>,
     ) -> Self {
+        Self::new_with_unused_keys(
+            value,
+            path,
+            UnusedKeys::from_callback(unused_key_callback),
+            field_transformer,
+        )
+    }
+
+    fn new_with_unused_keys(
+        value: Value,
+        path: Path<'a>,
+        unused_keys: UnusedKeys<'u>,
+        field_transformer: Option<FieldTransformer<'f>>,
+    ) -> Self {
         value.broadcast_start_mark();
 
         ValueDeserializer {
             value,
             path,
-            unused_key_callback,
+            unused_keys,
             field_transformer,
             is_transformed: false,
         }
@@ -375,7 +417,7 @@ impl<'a, 'u, 'f> ValueDeserializer<'a, 'u, 'f> {
         ValueDeserializer {
             value,
             path,
-            unused_key_callback,
+            unused_keys: UnusedKeys::from_callback(unused_key_callback),
             field_transformer,
             is_transformed: true,
         }
@@ -406,7 +448,7 @@ macro_rules! maybe_expecting_should_be {
                         // so we know that `res` can not contain references to `self.value`.
                         unsafe { std::mem::transmute::<&Value, &'de Value>(&$self.value) },
                         $self.path,
-                        $self.unused_key_callback,
+                        $self.unused_keys.callback,
                         $self.field_transformer,
                     )
                     .$method($($args),*)
@@ -435,13 +477,13 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
         let span = self.value.span().clone();
         self.value.broadcast_end_mark();
         if super::should_short_circuit_any(self.field_transformer.is_some()) {
-            // SAFETY: self.unused_key_callback and self.field_transformer are
+            // SAFETY: self.unused_keys.callback and self.field_transformer are
             // passed in from outside and guaranteed to be valid for 'de
             unsafe {
                 save_deserializer_state(
                     Some(self.value),
                     self.path,
-                    self.unused_key_callback,
+                    self.unused_keys.callback,
                     self.field_transformer,
                 );
             }
@@ -459,14 +501,14 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                 v,
                 self.path,
                 visitor,
-                self.unused_key_callback,
+                self.unused_keys.callback,
                 self.field_transformer,
             ),
             Value::Mapping(v, ..) => visit_mapping(
                 v,
                 self.path,
                 visitor,
-                self.unused_key_callback,
+                self.unused_keys.callback,
                 self.field_transformer,
             ),
             Value::Tagged(tagged, ..) => visitor.visit_enum(*tagged),
@@ -650,7 +692,7 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                 v,
                 self.path,
                 visitor,
-                self.unused_key_callback,
+                self.unused_keys.callback,
                 self.field_transformer,
             ),
             other => Err(other.invalid_type(&visitor)),
@@ -671,7 +713,7 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
             _ => visitor.visit_some(ValueDeserializer {
                 value: self.value,
                 path: self.path,
-                unused_key_callback: self.unused_key_callback,
+                unused_keys: self.unused_keys,
                 field_transformer: self.field_transformer,
                 is_transformed: true,
             }),
@@ -735,14 +777,14 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                 v,
                 self.path,
                 visitor,
-                self.unused_key_callback,
+                self.unused_keys.callback,
                 self.field_transformer,
             ),
             Value::Null(..) => visit_sequence(
                 Sequence::new(),
                 self.path,
                 visitor,
-                self.unused_key_callback,
+                self.unused_keys.callback,
                 self.field_transformer,
             ),
             other => Err(other.invalid_type(&visitor)),
@@ -783,14 +825,14 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                 v,
                 self.path,
                 visitor,
-                self.unused_key_callback,
+                self.unused_keys.callback,
                 self.field_transformer,
             ),
             Value::Null(..) => visit_mapping(
                 Mapping::new(),
                 self.path,
                 visitor,
-                self.unused_key_callback,
+                self.unused_keys.callback,
                 self.field_transformer,
             ),
             other => Err(other.invalid_type(&visitor)),
@@ -818,7 +860,7 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                 self.path,
                 visitor,
                 fields,
-                self.unused_key_callback,
+                self.unused_keys,
                 self.field_transformer,
             ),
             Value::Null(..) => visit_struct(
@@ -826,7 +868,7 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                 self.path,
                 visitor,
                 fields,
-                self.unused_key_callback,
+                self.unused_keys,
                 self.field_transformer,
             ),
             other => Err(other.invalid_type(&visitor)),
@@ -859,7 +901,7 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                     },
                     path: self.path,
                     value: Some(tagged.value),
-                    unused_key_callback: self.unused_key_callback,
+                    unused_key_callback: self.unused_keys.callback,
                     field_transformer: self.field_transformer,
                 },
                 Value::String(variant, ..) => EnumDeserializer {
@@ -869,7 +911,7 @@ impl<'de, 'u, 'f> Deserializer<'de> for ValueDeserializer<'_, 'u, 'f> {
                     },
                     path: self.path,
                     value: None,
-                    unused_key_callback: self.unused_key_callback,
+                    unused_key_callback: self.unused_keys.callback,
                     field_transformer: self.field_transformer,
                 },
                 other => {
@@ -1001,10 +1043,10 @@ impl<'de, 'u, 'f> VariantAccess<'de> for VariantDeserializer<'_, 'f, 'u> {
         match self.value {
             Some(Value::Mapping(v, ..)) => Deserializer::deserialize_any(
                 StructDeserializer::new(
-                    v,
+                    v.into_iter(),
                     self.path,
                     fields,
-                    self.unused_key_callback,
+                    UnusedKeys::from_callback(self.unused_key_callback),
                     self.field_transformer,
                 ),
                 visitor,
@@ -1041,7 +1083,7 @@ impl<'de, 'u, 'f> VariantAccess<'de> for ValueDeserializer<'_, 'u, 'f> {
                 SeqDeserializer::new(
                     v,
                     self.path,
-                    self.unused_key_callback,
+                    self.unused_keys.callback,
                     self.field_transformer,
                 ),
                 visitor,
@@ -1065,10 +1107,10 @@ impl<'de, 'u, 'f> VariantAccess<'de> for ValueDeserializer<'_, 'u, 'f> {
         if let Value::Mapping(v, ..) = self.value {
             Deserializer::deserialize_any(
                 StructDeserializer::new(
-                    v,
+                    v.into_iter(),
                     self.path,
                     fields,
-                    self.unused_key_callback,
+                    self.unused_keys,
                     self.field_transformer,
                 ),
                 visitor,
@@ -1317,18 +1359,18 @@ pub(crate) struct StructDeserializer<'a, 'u, 'f> {
     value: Option<Value>,
     normal_keys: HashSet<&'static str>,
     flatten_keys: Vec<&'static str>,
-    unused_key_callback: Option<UnusedKeyCallback<'u>>,
+    unused_keys: UnusedKeys<'u>,
     field_transformer: Option<FieldTransformer<'f>>,
-    rest: Vec<(Value, Value)>,
+    rest: FlattenRest,
     flatten_keys_done: usize,
 }
 
 impl<'a, 'u, 'f> StructDeserializer<'a, 'u, 'f> {
-    pub(crate) fn new(
-        map: Mapping,
+    fn new(
+        iter: <Mapping as IntoIterator>::IntoIter,
         current_path: Path<'a>,
         known_keys: &'static [&'static str],
-        unused_key_callback: Option<UnusedKeyCallback<'u>>,
+        unused_keys: UnusedKeys<'u>,
         field_transformer: Option<FieldTransformer<'f>>,
     ) -> Self {
         let (normal_keys, flatten_keys): (Vec<_>, Vec<_>) = known_keys
@@ -1336,15 +1378,15 @@ impl<'a, 'u, 'f> StructDeserializer<'a, 'u, 'f> {
             .copied()
             .partition(|key| !crate::is_flatten_key(key.as_bytes()));
         StructDeserializer {
-            iter: map.into_iter(),
+            iter,
             current_key: None,
             path: current_path,
             value: None,
             normal_keys: normal_keys.into_iter().collect(),
             flatten_keys,
-            unused_key_callback,
+            unused_keys,
             field_transformer,
-            rest: Vec::new(),
+            rest: FlattenRest::default(),
             flatten_keys_done: 0,
         }
     }
@@ -1371,14 +1413,18 @@ impl<'de> MapAccess<'de> for StructDeserializer<'_, '_, '_> {
                 Some((key, value)) => {
                     match key.as_str() {
                         Some(key_str) if crate::is_flatten_key(key_str.as_bytes()) => {
-                            self.rest.push((key, value));
+                            self.rest.get_mut().push((key, value));
                             continue;
                         }
                         Some(key_str) if !self.normal_keys.contains(key_str) => {
                             if self.has_flatten() {
-                                self.rest.push((key, value));
+                                self.rest.get_mut().push((key, value));
                                 continue;
-                            } else if let Some(callback) = &mut self.unused_key_callback {
+                            } else if let Some(sink) = self.unused_keys.sink {
+                                value.broadcast_end_mark();
+                                sink.borrow_mut().push((key, value));
+                                continue;
+                            } else if let Some(callback) = &mut self.unused_keys.callback {
                                 value.broadcast_end_mark();
                                 let key_string = key_str.to_string();
                                 let path = Path::Map {
@@ -1413,7 +1459,7 @@ impl<'de> MapAccess<'de> for StructDeserializer<'_, '_, '_> {
         T: DeserializeSeed<'de>,
     {
         match self.value.take() {
-            Some(value) => seed.deserialize(ValueDeserializer::new_with(
+            Some(value) => seed.deserialize(ValueDeserializer::new_with_unused_keys(
                 value,
                 match self.current_key {
                     Some(ref key) => Path::Map {
@@ -1422,9 +1468,7 @@ impl<'de> MapAccess<'de> for StructDeserializer<'_, '_, '_> {
                     },
                     None => Path::Unknown { parent: &self.path },
                 },
-                self.unused_key_callback
-                    .as_deref_mut()
-                    .map(|cb| &mut *cb as UnusedKeyCallback<'_>),
+                self.unused_keys.reborrow(),
                 self.field_transformer
                     .as_deref_mut()
                     .map(|cb| &mut *cb as FieldTransformer<'_>),
@@ -1434,25 +1478,32 @@ impl<'de> MapAccess<'de> for StructDeserializer<'_, '_, '_> {
 
                 // Flatten keys are always dunder-wrapped; do not add them to the path.
                 let path = self.path;
+                let rest = self.rest.get_mut().drain(..).collect::<Mapping>();
 
                 if self.has_unprocessed_flatten_keys() {
-                    let rest = self.rest.drain(..).collect::<Mapping>();
+                    let remaining = &self.rest;
+                    // A reusable deserializer state can return the callback to
+                    // the seed, so the callback lives for the whole seed call.
+                    let mut collect_unused = |_: Path<'_>, key: &Value, value: &Value| {
+                        remaining.borrow_mut().push((key.clone(), value.clone()));
+                    };
                     let deserializer = FlattenDeserializer::new(
                         rest.into_iter(),
                         path,
-                        &mut self.rest,
+                        UnusedKeys {
+                            callback: Some(&mut collect_unused),
+                            sink: Some(remaining),
+                        },
                         self.field_transformer
                             .as_deref_mut()
                             .map(|cb| &mut *cb as FieldTransformer<'_>),
                     );
                     seed.deserialize(deserializer)
                 } else {
-                    let deserializer = ValueDeserializer::new_with(
-                        Value::mapping(self.rest.drain(..).collect()),
+                    let deserializer = ValueDeserializer::new_with_unused_keys(
+                        Value::mapping(rest),
                         path,
-                        self.unused_key_callback
-                            .as_deref_mut()
-                            .map(|cb| &mut *cb as UnusedKeyCallback<'_>),
+                        self.unused_keys.reborrow(),
                         self.field_transformer
                             .as_deref_mut()
                             .map(|cb| &mut *cb as FieldTransformer<'_>),
@@ -1502,21 +1553,21 @@ impl<'de, 'u, 'f> Deserializer<'de> for StructDeserializer<'_, 'u, 'f> {
 struct FlattenDeserializer<'p, 'r, 'f> {
     iter: <Mapping as IntoIterator>::IntoIter,
     path: Path<'p>,
-    remaining: &'r mut Vec<(Value, Value)>,
+    unused_keys: UnusedKeys<'r>,
     field_transformer: Option<FieldTransformer<'f>>,
 }
 
 impl<'p, 'f, 'r> FlattenDeserializer<'p, 'r, 'f> {
-    pub(crate) fn new(
+    fn new(
         iter: <Mapping as IntoIterator>::IntoIter,
         current_path: Path<'p>,
-        remaining: &'r mut Vec<(Value, Value)>,
+        unused_keys: UnusedKeys<'r>,
         field_transformer: Option<FieldTransformer<'f>>,
     ) -> Self {
         FlattenDeserializer {
             iter,
             path: current_path,
-            remaining,
+            unused_keys,
             field_transformer,
         }
     }
@@ -1529,19 +1580,15 @@ impl<'de, 'r, 'f> Deserializer<'de> for FlattenDeserializer<'_, 'r, 'f> {
     where
         V: Visitor<'de>,
     {
-        let mut collect_unused = move |_: Path<'_>, key: &Value, value: &Value| {
-            self.remaining.push((key.clone(), value.clone()));
-        };
-
         if super::should_short_circuit_any(self.field_transformer.is_some()) {
             let value = Value::mapping(self.iter.collect());
-            // SAFETY: self.unused_key_callback and self.field_transformer are
-            // passed in from outside and guaranteed to be valid for 'de
+            // SAFETY: the callback and transformer belong to the enclosing
+            // seed call and stay alive during synchronous state replay.
             unsafe {
                 save_deserializer_state(
                     Some(value),
                     self.path,
-                    Some(&mut collect_unused as UnusedKeyCallback<'_>),
+                    self.unused_keys.callback,
                     self.field_transformer,
                 );
             }
@@ -1553,7 +1600,7 @@ impl<'de, 'r, 'f> Deserializer<'de> for FlattenDeserializer<'_, 'r, 'f> {
             current_key: None,
             path: self.path,
             value: None,
-            unused_key_callback: Some(&mut collect_unused),
+            unused_key_callback: self.unused_keys.callback,
             field_transformer: self.field_transformer,
         };
         visitor.visit_map(deserializer)
@@ -1568,26 +1615,13 @@ impl<'de, 'r, 'f> Deserializer<'de> for FlattenDeserializer<'_, 'r, 'f> {
     where
         V: Visitor<'de>,
     {
-        let mut collect_unused = |_: Path<'_>, key: &Value, value: &Value| {
-            self.remaining.push((key.clone(), value.clone()));
-        };
-
-        let (normal_keys, flatten_keys): (Vec<_>, Vec<_>) = fields
-            .iter()
-            .copied()
-            .partition(|key| !crate::is_flatten_key(key.as_bytes()));
-        let deserializer = StructDeserializer {
-            iter: self.iter,
-            current_key: None,
-            path: self.path,
-            value: None,
-            normal_keys: normal_keys.into_iter().collect(),
-            flatten_keys,
-            unused_key_callback: Some(&mut collect_unused),
-            field_transformer: self.field_transformer,
-            rest: Vec::new(),
-            flatten_keys_done: 0,
-        };
+        let deserializer = StructDeserializer::new(
+            self.iter,
+            self.path,
+            fields,
+            self.unused_keys,
+            self.field_transformer,
+        );
         visitor.visit_map(deserializer)
     }
 
